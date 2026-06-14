@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>学习记录 0002：两种核心循环架构的发现</title>
+<link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="../../learning-records/0002-core-loop-architectures.html">EN</a>
+  <span>/</span>
+  <a href="../../zh/learning-records/0002-core-loop-architectures.html" class="active">中文</a>
+</nav>
+
+<h1>学习记录 0002：两种核心循环架构的发现</h1>
+<p class="meta">2026-06-13</p>
+
+<p>对 7 个生产级 agent 代码库的分析揭示了两种主导的循环架构：<strong>嵌套双层循环</strong>（nested two-loop，见于 pi-mono、openclaw）与<strong>扁平 while-true 循环</strong>（flat while-true，见于 claude-code、hermes-agent）。</p>
+
+<p>关键驱动因素是恢复复杂度（recovery complexity）——扁平循环将级联回退路径集中在一处，一目了然；嵌套循环则在恢复逻辑简单时提供更清晰的关注点分离。</p>
+
+<p>第三种模式（显式状态机，如 nanobot 的 7 状态 TurnState）虽然可行，但较为少见。</p>
+
+<p>另识别出：batch 与 streaming 两种 tool 执行方式，作为与循环结构正交的次级维度。</p>
+
+<h2>证据</h2>
+<p>直接阅读了全部 7 个核心循环实现代码（文件和行号已在第一课中记录）。</p>
+
+<h2>启示</h2>
+<p>后续关于 tool 系统和上下文管理的课程，应分析这些架构选择是否与特定的 tool 执行策略或 compaction 策略相关联。</p>
+
+<div class="nav">
+  <span><a href="0001-prior-knowledge.html">&larr; 上一篇</a></span>
+  <span><a href="../../index.html">首页 &uarr;</a></span>
+</div>
+
+</body>
+</html>

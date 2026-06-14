@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Harness 术语表</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  :root { --bg: #fffff8; --text: #111; --muted: #666; --accent: #a00; --rule: #ddd; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 6rem; background: var(--bg); color: var(--text); line-height: 1.5; }
+  h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.35rem; margin: 2rem 0 0.5rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  dt { font-weight: 600; margin-top: 0.8rem; font-size: 0.95rem; }
+  dd { margin-left: 1.5rem; font-size: 0.92rem; margin-bottom: 0.5rem; }
+  .avoid { color: var(--accent); font-size: 0.85rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 1.5rem; }
+  .lang-nav { text-align: right; font-size: 0.85rem; margin-bottom: 1rem; color: var(--muted); }
+  .lang-nav a { color: var(--muted); text-decoration: none; }
+  .lang-nav a:hover { color: var(--accent); text-decoration: underline; }
+  .lang-nav a.active { color: var(--text); font-weight: 600; }
+  .lang-nav span { margin: 0 0.25rem; }
+  a { color: var(--accent); }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="../../reference/glossary.html">EN</a>
+  <span>/</span>
+  <a href="../zh/reference/glossary.html" class="active">中文</a>
+</nav>
+
+<h1>Agent Harness 术语表</h1>
+<p class="subtitle">代理架构工作空间的规范术语。这些定义带有倾向性——旨在消除更广泛领域中的歧义。</p>
+
+<h2>核心循环</h2>
+
+<dt>代理运行框架 (Agent Harness)</dt>
+<dd>管理基于 LLM 的代理执行的外围基础设施：包括循环、工具系统、上下文管理、权限和会话生命周期。去掉 LLM、工具和 UI 之后剩下的部分就是运行框架。<br><span class="avoid">避免使用: agent framework (过于宽泛), agent runtime (过于宽泛)。</span></dd>
+
+<dt>核心循环 (Core Loop)</dt>
+<dd>基本的执行循环：接收输入 → 调用 LLM → 执行工具 → 将结果反馈回去 → 重复或停止。也称为"思考-行动-观察循环"或"ReAct 循环"。<br><span class="avoid">避免使用: agent loop (与 message pump 存在歧义)。</span></dd>
+
+<dt>回合 (Turn)</dt>
+<dd>核心循环的一个完整周期：一次 LLM 调用加上其所产生的所有工具调用的执行，当满足以下任一条件时结束：(a) 模型只返回文本，(b) 停止钩子触发，或 (c) 发生错误/中止。一次用户请求可能跨越多个回合。<br><span class="avoid">避免使用: step, iteration (存在歧义——有些代码库用 "step" 表示单次 LLM 调用，不论是否涉及工具)。</span></dd>
+
+<dt>迭代 (Iteration)</dt>
+<dd>一个回合内的单次 LLM API 调用。一个有 N 轮工具执行的回合包含 N+1 次迭代（1 次初始调用 + N 次工具批次后的后续调用）。<br><span class="avoid">避免使用: step (claude-code 用 "step" 表示我们所称的 "turn")。</span></dd>
+
+<dt>嵌套双循环架构 (Nested Two-Loop Architecture)</dt>
+<dd>一种核心循环结构，外层 <code>while (true)</code> 处理跟进消息，内层 <code>while (hasToolCalls)</code> 处理工具回合。pi-mono 和 openclaw 采用此架构。<br><span class="avoid">避免使用: double loop (过于模糊)。</span></dd>
+
+<dt>扁平 while-true 架构 (Flat While-True Architecture)</dt>
+<dd>一种核心循环结构，使用单个 <code>while (true)</code>，其中所有关注点——上下文准备、LLM 调用、工具执行、恢复——都是单次迭代内的顺序阶段。claude-code 和 hermes-agent 采用此架构。<br><span class="avoid">避免使用: single loop (存在歧义)。</span></dd>
+
+<h2>工具系统</h2>
+
+<dt>批量执行 (Batch Execution)</dt>
+<dd>在 LLM 响应流完成之后，并行或顺序执行响应中的所有工具调用。实现更简单但延迟更高。<br><span class="avoid">避免使用: post-stream execution。</span></dd>
+
+<dt>流式执行 (Streaming Execution)</dt>
+<dd>在 LLM 于流中逐个输出工具调用时就立即执行，不等完整响应返回。延迟更低但需要谨慎的状态管理。<br><span class="avoid">避免使用: eager execution (不够具体)。</span></dd>
+
+<dt>工具结果终止 (Tool Result Termination)</dt>
+<dd>一种工具结果标志（<code>terminate: true</code>），表示核心循环应在该工具批次后停止。用于工具的输出本身就是最终答案的场景。<br><span class="avoid">避免使用: final tool, terminal tool。</span></dd>
+
+<h2>上下文管理</h2>
+
+<dt>上下文精简 (Compaction)</dt>
+<dd>缩小对话上下文的大小以保持在模型的上下文窗口内。可能采用摘要（由 LLM 生成摘要）、截断（丢弃最旧的消息）或微精简（将单个工具结果替换为简短摘要）的方式。<br><span class="avoid">避免使用: compression (暗示无损，而精简很少是无损的)。</span></dd>
+
+<dt>主动精简 (Proactive Compaction)</dt>
+<dd>在溢出发生之前精简上下文，通常在接近令牌阈值时触发。避免浪费会因 413 错误而失败的 API 调用。<br><span class="avoid">避免使用: pre-emptive compaction。</span></dd>
+
+<dt>被动精简 (Reactive Compaction)</dt>
+<dd>在收到 413（上下文过大）错误后精简上下文。实现更简单但会浪费一次失败的 API 调用。<br><span class="avoid">避免使用: emergency compaction。</span></dd>
+
+<h2>生命周期</h2>
+
+<dt>会话 (Session)</dt>
+<dd>用户与代理之间持久的、可寻址的对话。具有 ID，在代理重启后依然存在，并累积消息历史。可以跨越多次用户请求。<br><span class="avoid">避免使用: conversation (过于通用)。</span></dd>
+
+<dt>引导 (Steering)</dt>
+<dd>在运行过程中注入的一条用户消息，用于中断并重定向代理。代理完成当前工具执行后，在下次 LLM 调用之前处理引导消息。<br><span class="avoid">避免使用: interruption (引导是一种带有具体内容的中断)。</span></dd>
+
+<dt>跟进消息 (Follow-up)</dt>
+<dd>在代理运行期间排队的一条消息，应在代理即将停止之后处理。用于子代理结果、通知命令和多步骤编排。<br><span class="avoid">避免使用: deferred message, queued message。</span></dd>
+
+<div class="nav">
+  <a href="../../lessons/0001-core-loop.html">第 0001 课：核心循环 &rarr;</a>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第1课：Agent 核心循环 — 思考、行动、观察、重复</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  :root {
+    --bg: #fffff8;
+    --text: #111;
+    --muted: #666;
+    --accent: #a00;
+    --rule: #ddd;
+    --code-bg: #f4f4f0;
+    --highlight: #fffacd;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem 6rem;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+  h1 { font-size: 2rem; margin-bottom: 0.15rem; }
+  h2 { font-size: 1.35rem; margin: 2.2rem 0 0.6rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  h3 { font-size: 1.08rem; margin: 1.5rem 0 0.5rem; }
+  p { font-size: 0.95rem; margin-bottom: 0.8rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+  li { font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.25rem; }
+  .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; font-style: italic; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; margin-bottom: 0.5rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.85rem; }
+  th, td { padding: 0.45rem 0.55rem; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; background: #f8f8f0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:nth-child(even) td { background: #fafaf6; }
+  code { font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.87rem; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; margin: 0.8rem 0 1.2rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.45; border-left: 3px solid var(--accent); }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid var(--rule); padding-left: 1rem; margin: 1rem 0; color: var(--muted); font-style: italic; }
+  .figure { margin: 1.5rem 0; }
+  .figure .caption { font-size: 0.82rem; color: var(--muted); margin-top: 0.3rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .quiz { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1.5rem 0; }
+  .quiz h3 { margin-top: 0; }
+  .quiz .question { margin: 1rem 0 0.5rem; font-weight: 600; }
+  .quiz .options { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 1rem; }
+  .quiz .option { padding: 0.35rem 0.6rem; cursor: pointer; border: 1px solid var(--rule); background: #fff; font-size: 0.88rem; }
+  .quiz .option:hover { background: var(--highlight); }
+  .quiz .option.correct { background: #d4edda; border-color: #28a745; }
+  .quiz .option.wrong { background: #f8d7da; border-color: #dc3545; }
+  .quiz .feedback { margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.5rem; }
+  .diagram { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1rem 0; font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.82rem; white-space: pre; line-height: 1.3; overflow-x: auto; }
+  .callout { background: #fffacd; border: 1px solid #e6da8a; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="../lessons/0001-core-agent-loop.html">EN</a>
+  <span>/</span>
+  <a href="../zh/lessons/0001-core-agent-loop.html" class="active">中文</a>
+</nav>
+
+<h1>第1课：Agent 核心循环</h1>
+<p class="subtitle">思考、行动、观察、重复——每个 AI agent 的基础架构。</p>
+<p class="meta">2026年6月 · 8 个主要参考来源 · <a href="0001-core-loop.html">永久链接</a></p>
+
+<p>打开任意一个 agent 代码库。第一个要问的问题是：<em>循环在哪里？</em>每个 agent——无论是在终端中运行、在 Slack 频道中、还是在 Docker 容器中——都围绕同一个架构重心构建：在调用 LLM、执行工具和将结果回传之间循环的执行循环。</p>
+
+<p class="sidenote">CoALA（Sumers 等人，2023）是第一篇将其形式化为认知架构的论文：一个具有模块化记忆存储和结构化动作空间的通用决策循环。请参阅 <a href="https://arxiv.org/abs/2309.02427">arXiv:2309.02427</a>。</p>
+
+<p>本课逐行映射了七个生产级 agent 代码库中的循环——四个编程 agent（claude-code、codex、opencode、pi-mono）和三个通用 agent（hermes-agent、openclaw、nanobot）。我们将看到两种基本架构浮出水面，并理解推动团队选择其中一种的权衡。</p>
+
+<h2>通用骨架</h2>
+
+<p>剥离 CLI、聊天频道、插件和沙箱。每个 agent 循环都归结为：</p>
+
+<div class="diagram">
+┌─────────────────────────────────────────────────────┐
+│  while (should_continue):                           │
+│                                                     │
+│    // THINK phase                                    │
+│    response = await llm.stream({                    │
+│      system: system_prompt,                         │
+│      messages: conversation_history,                │
+│      tools: available_tools,                        │
+│    })                                               │
+│                                                     │
+│    // ACT phase                                      │
+│    if response.has_tool_calls():                    │
+│      for each tool_call:                            │
+│        result = execute(tool_call)                  │
+│        conversation_history.append(result)          │
+│                                                     │
+│    // OBSERVE (results already in history)          │
+│    // Loop continues — next LLM call sees results   │
+│                                                     │
+│    if response.is_text_only():                      │
+│      return response.text  // terminal state        │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+</div>
+
+<p>这就是 ReAct 模式（Yao 等人，2022）——推理与行动交错进行。LLM 推理要做什么，agent 去执行，结果被回传用于下一轮推理。仅此而已。</p>
+
+<p>但仔细审视七个真实实现，这个简单的循环分化为两种根本不同的架构。</p>
+
+<h2>两种架构</h2>
+
+<h3>架构 A：嵌套双循环</h3>
+
+<p>使用者：<strong>pi-mono、openclaw</strong>（opencode 也可能有部分继承）。</p>
+
+<p><em>外层循环</em>处理后续消息（用户中断、在 agent 原本将停止后到达的排队命令）。<em>内层循环</em>运行实际的思考-行动-观察回合：</p>
+
+<div class="diagram">
+// pi-mono: packages/agent/src/agent-loop.ts, runLoop()
+// openclaw: packages/agent-core/src/agent-loop.ts, runLoop()
+//
+// (这两个实现结构完全相同——openclaw 的是 fork 版本。)
+
+while (true) {                        // OUTER: follow-up loop
+  while (hasMoreToolCalls              // INNER: tool turn loop
+         || pendingMessages > 0) {
+    message = await streamAssistant()  // THINK
+    toolCalls = executeTools(message)  // ACT
+    hasMoreToolCalls = !allTerminate   // OBSERVE → decide
+  }
+  followUps = getFollowUpMessages()
+  if (followUps.length === 0) break   // terminal state
+  pendingMessages = followUps
+}
+</div>
+
+<p><strong>为什么采用这种设计？</strong>后续消息是一种常见模式：用户在运行中途打断（"不行，换个方法"），或者子 agent 完成后其结果需要被注入。通过将后续消息处理分离到自己的外层循环中，内层循环可以纯粹专注于思考-行动-观察周期，无需在每次迭代时检查外部中断。</p>
+
+<p class="sidenote">pi-mono 和 openclaw 共享这种架构，因为 openclaw 的 agent-core 包是 pi 的 agent 包的直接后裔。代码谱系很重要。</p>
+
+<h3>架构 B：扁平 While-True 循环</h3>
+
+<p>使用者：<strong>claude-code、hermes-agent</strong>。单个 <code>while (true)</code> 循环，将所有关注点——工具执行、后续消息注入、恢复——作为单次迭代内的分支处理。</p>
+
+<div class="diagram">
+// claude-code: src/query.ts, queryLoop()
+// hermes-agent: agent/conversation_loop.py, run_conversation()
+
+while (true) {
+  // Phase A: Context prep (compaction, budget checks)
+  prepareContext(state)
+
+  // Phase B: THINK — stream LLM response
+  for await (event of streamModel(state)) {
+    if (event.type === 'tool_use')
+      startToolExecution(event)  // may run during streaming
+  }
+
+  // Phase C: No tools? → check stop hooks, token budget, return
+  if (!needsFollowUp) {
+    runStopHooks()
+    if (ok) return { reason: 'completed' }
+  }
+
+  // Phase D: ACT — execute remaining tools
+  if (needsFollowUp) {
+    await executeAllTools()
+    // Phase E: OBSERVE — collect results, refresh, continue
+    state = nextState(state, toolResults)
+    continue  // back to top of while(true)
+  }
+}
+</div>
+
+<p><strong>为什么采用这种设计？</strong>当恢复逻辑非常复杂时——提示过长、max_output_tokens、响应式压缩、模型回退、中止处理——扁平循环加上显式阶段比嵌套循环更易于推理，因为嵌套循环的不同恢复路径在不同层级退出。Claude Code 的循环有<em>十二种</em>不同的终止原因（query.ts 第 1050–1720 行）；每个都是扁平序列中正确位置的 <code>return { reason: '...' }</code>。</p>
+
+<h3>第三种变体：分层状态机</h3>
+
+<p>使用者：<strong>nanobot</strong>。nanobot 不是使用嵌套循环或扁平 while-true，而是使用具有 7 个状态的显式状态机（RESTORE → COMPACT → COMMAND → BUILD → RUN → SAVE → RESPOND → DONE）。在 RUN 状态中，一个单独的 <code>for iteration in range(max_iterations)</code> 循环处理思考-行动周期。</p>
+
+<p>使用者：<strong>codex</strong>（Rust）。四个不同的循环层级——submission_loop、task loop、turn loop、sampling loop——每个都有各自的终止条件。turn loop 调用 <code>run_sampling_request()</code>，后者在内部流式传输 LLM 响应，通过 <code>FuturesOrdered</code> 清空进行中的工具 future，并确定 <code>needs_follow_up</code>。</p>
+
+<p>使用者：<strong>opencode</strong>。使用 Effect-TS fibers 而非原始的 async/await。<code>run()</code> 函数是一个 <code>Effect.fn</code> 生成器，在 <code>while (openActivity)</code> 外层守卫内部有一个 <code>for (let step = 0; step &lt; MAX_STEPS; step++)</code> 循环。</p>
+
+<h2>对比表</h2>
+
+<table>
+  <tr>
+    <th>维度</th>
+    <th>pi-mono</th>
+    <th>openclaw</th>
+    <th>claude-code</th>
+    <th>hermes-agent</th>
+    <th>nanobot</th>
+    <th>codex</th>
+    <th>opencode</th>
+  </tr>
+  <tr>
+    <td><strong>循环架构</strong></td>
+    <td>嵌套双循环</td>
+    <td>嵌套双循环</td>
+    <td>扁平 while-true</td>
+    <td>扁平 while + 重试</td>
+    <td>状态机 + for 循环</td>
+    <td>4 层嵌套</td>
+    <td>外层 while + 内层 for</td>
+  </tr>
+  <tr>
+    <td><strong>循环嵌套层级</strong></td>
+    <td>2 层</td>
+    <td>2 层</td>
+    <td>1 层</td>
+    <td>2 层</td>
+    <td>3 层</td>
+    <td>4 层</td>
+    <td>2 层</td>
+  </tr>
+  <tr>
+    <td><strong>状态管理</strong></td>
+    <td>事件流</td>
+    <td>事件流</td>
+    <td>可变 State 结构体</td>
+    <td>就地消息列表</td>
+    <td>AgentRunSpec 上下文</td>
+    <td>不可变历史克隆</td>
+    <td>持久化数据库 + fibers</td>
+  </tr>
+  <tr>
+    <td><strong>工具执行时机</strong></td>
+    <td>流结束后</td>
+    <td>流结束后</td>
+    <td>流进行中（可选）</td>
+    <td>流结束后</td>
+    <td>流结束后</td>
+    <td>流进行中</td>
+    <td>两者均可（可配置）</td>
+  </tr>
+  <tr>
+    <td><strong>并发模型</strong></td>
+    <td>async/await + EventStream</td>
+    <td>async/await + EventStream</td>
+    <td>Async generator</td>
+    <td>Sync + 后台线程</td>
+    <td>asyncio + tasks</td>
+    <td>Tokio async</td>
+    <td>Effect-TS fibers</td>
+  </tr>
+  <tr>
+    <td><strong>最大迭代次数</strong></td>
+    <td>无限制（由后续消息驱动）</td>
+    <td>无限制（由后续消息驱动）</td>
+    <td>maxTurns 配置</td>
+    <td>max_iterations（90）</td>
+    <td>max_iterations</td>
+    <td>无限制（由输入驱动）</td>
+    <td>MAX_STEPS（25）</td>
+  </tr>
+  <tr>
+    <td><strong>恢复复杂度</strong></td>
+    <td>低（重试+错误）</td>
+    <td>中等（模型回退）</td>
+    <td><strong>非常高</strong></td>
+    <td><strong>非常高</strong></td>
+    <td>中等</td>
+    <td>中等</td>
+    <td>低（Effect 恢复）</td>
+  </tr>
+  <tr>
+    <td><strong>主要源文件</strong></td>
+    <td><code>agent-loop.ts:155</code></td>
+    <td><code>agent-loop.ts:258</code></td>
+    <td><code>query.ts:241</code></td>
+    <td><code>conversation_loop.py:371</code></td>
+    <td><code>loop.py:867</code></td>
+    <td><code>turn.rs:137</code></td>
+    <td><code>llm.ts:373</code></td>
+  </tr>
+</table>
+
+<h2>根本权衡：嵌套深度</h2>
+
+<p>为什么 codex 有 4 层循环而 claude-code 只有 1 层？这不是偶然——它反映了不同的优先级：</p>
+
+<p><strong>更多嵌套 = 更多关注点分离。</strong>Codex 的四层各自处理一件事：submission_loop 管理层会话生命周期，task loop 管理任务生命周期（中止/重启），turn loop 管理思考-行动循环，sampling loop 管理重试。每一层都可以独立测试和推理。</p>
+
+<p><strong>更少嵌套 = 更容易看到所有终止路径。</strong>Claude Code 的单个扁平循环使全部十二种退出条件在一个函数中可见。当恢复逻辑像 Claude Code 中那样复杂时（提示过长 → 折叠耗尽 → 响应式压缩 → 升级最大 token → 注入恢复消息 → 最终返回错误），扁平化循环使得更难遗漏某个恢复路径。</p>
+
+<div class="callout">
+  <strong>设计启发：</strong>如果恢复逻辑简单（错误时重试、信号时中止），嵌套循环工作良好。如果恢复逻辑涉及跨多个维度的级联回退（上下文大小、token 预算、模型可用性、停止钩子），则将循环扁平化，使所有路径在一个地方可见。
+</div>
+
+<h2>另一个关键维度：工具何时执行？</h2>
+
+<p>两个阵营：</p>
+
+<ol>
+  <li><strong>批量执行</strong>（pi-mono、openclaw、nanobot、hermes-agent）：等待 LLM 流完成，收集所有工具调用，然后执行。实现简单，但本可以在 5 秒前就开始运行的工具却闲置等待模型完成生成。</li>
+  <li><strong>流式执行</strong>（claude-code、codex）：在模型在流中<em>一发出</em>工具调用时就立即执行。工具与模型响应的其余部分并发运行。减少延迟，但需要仔细的状态管理——当工具结果在模型完成流式输出之前到达时会发生什么？</li>
+</ol>
+
+<p class="sidenote">Claude Code 的 StreamingToolExecutor 在 tool_use block 的 content_block_start 触发时立即启动工具，但跟踪进行中的结果，以便在回合周期的适当时机将其返回给循环。</p>
+
+<p>这关联到一个更深层次的设计问题——关于<strong>工具执行模型</strong>本身——在<a href="0002-tool-system.html">第2课：工具系统</a>中详述。</p>
+
+<h2>练习：识别循环</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>小测验</h3>
+  <p style="margin-bottom:0.8rem;">每题只有一个正确答案。所有选项长度相同，避免给出线索。</p>
+
+  <div class="question">Q1. 哪个代码库使用 7 状态显式状态机（RESTORE→COMPACT→...→DONE）而非嵌套循环？</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">hermes-agent</div>
+    <div class="option" data-q="1" data-a="b">nanobot</div>
+    <div class="option" data-q="1" data-a="c">pi-mono</div>
+    <div class="option" data-q="1" data-a="d">codex</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. Claude Code 使用扁平 while-true 循环而非嵌套循环的主要原因是什么？</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">性能优化</div>
+    <div class="option" data-q="2" data-a="b">更简洁的代码结构</div>
+    <div class="option" data-q="2" data-a="c">复杂的恢复路径</div>
+    <div class="option" data-q="2" data-a="d">遗留兼容性</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. 在 codex 的 4 层架构中，哪一层包含实际的思考-行动-观察周期？</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">submission_loop</div>
+    <div class="option" data-q="3" data-a="b">task loop</div>
+    <div class="option" data-q="3" data-a="c">turn loop</div>
+    <div class="option" data-q="3" data-a="d">sampling loop</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function() {
+  const answers = { 1: 'b', 2: 'c', 3: 'c' };
+  document.querySelectorAll('.option').forEach(opt => {
+    opt.addEventListener('click', function() {
+      const q = this.dataset.q;
+      const a = this.dataset.a;
+      const feedback = document.getElementById('feedback' + q);
+      const siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(s => s.classList.remove('correct', 'wrong'));
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ 正确。';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ 不太对——请重读上文相关部分。';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>尚未涉及的内容</h2>
+
+<p>本课聚焦于<em>循环结构</em>——骨架般的控制流。我们刻意推迟了：</p>
+<ul>
+  <li><strong>工具执行语义</strong>——工具如何定义、分发和沙箱化（<a href="0002-tool-system.html">第2课</a>）</li>
+  <li><strong>上下文组合与压缩</strong>——系统提示和消息历史如何构建和管理（<a href="0003-context-management.html">第3课</a>）</li>
+  <li><strong>权限与安全</strong>——agent 允许做什么（<a href="0004-permission-model.html">第4课</a>）</li>
+  <li><strong>子 agent 生成</strong>——当工作被委托出去时循环如何变化（<a href="0006-subagents.html">第6课</a>）</li>
+</ul>
+
+<h2>主要参考来源</h2>
+
+<p>本课中的每个论断都基于实际代码。请阅读以下源文件：</p>
+<ol>
+  <li><strong>pi-mono</strong>: <a href="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent-loop.ts#L155"><code>agent-loop.ts</code> — <code>runLoop()</code>（第 155 行）</a> 以及 <code>streamAssistantResponse()</code>（第 275 行）</li>
+  <li><strong>openclaw</strong>: <a href="https://github.com/openclaw/openclaw/blob/main/packages/agent-core/src/agent-loop.ts#L258"><code>agent-loop.ts</code> — <code>runLoop()</code>（第 258 行）</a></li>
+  <li><strong>claude-code</strong>: <code>src/query.ts</code> — <code>queryLoop()</code>（第 241 行），State type（第 204 行）</li>
+  <li><strong>hermes-agent</strong>: <a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/conversation_loop.py#L371"><code>conversation_loop.py</code> — <code>run_conversation()</code>（第 371 行）</a></li>
+  <li><strong>nanobot</strong>: <a href="https://github.com/HKUDS/nanobot/blob/main/nanobot/agent/loop.py#L867"><code>loop.py</code> — <code>AgentLoop.run()</code>（第 867 行）</a></li>
+  <li><strong>codex</strong>: <a href="https://github.com/openai/codex/blob/main/codex-rs/core/src/session/turn.rs#L137"><code>turn.rs</code> — <code>run_turn()</code>（第 137 行）</a></li>
+  <li><strong>opencode</strong>: <a href="https://github.com/anomalyco/opencode/blob/main/packages/core/src/session/runner/llm.ts#L373"><code>llm.ts</code> — <code>run()</code>（第 373 行）</a></li>
+  <li><strong>CoALA 论文</strong>: <a href="https://arxiv.org/abs/2309.02427">Sumers 等人，"Cognitive Architectures for Language Agents"（2023）</a></li>
+  <li><strong>ReAct 论文</strong>: <a href="https://arxiv.org/abs/2210.03629">Yao 等人，"ReAct: Synergizing Reasoning and Acting in Language Models"（2022）</a></li>
+</ol>
+
+<h2>推荐下一步阅读</h2>
+<p>在下节课之前，打开以下文件之一，亲自追踪循环：</p>
+<ul>
+  <li>想看<strong>最精简</strong>版本：<code>pi-mono/packages/agent/src/agent-loop.ts</code>——整个 runLoop() 约 115 行，是嵌套双循环架构最干净的表达。</li>
+  <li>想看<strong>最复杂</strong>版本：<code>claude-code/src/query.ts</code>——queryLoop() 约 1,500 行，展示了生产级 agent 所需的每种恢复路径、预算检查和流式优化。</li>
+  <li>想看<strong>不同范式</strong>版本：<code>nanobot/nanobot/agent/loop.py</code>——显式状态机是原生循环之外的令人耳目一新的替代方案。</li>
+</ul>
+
+<div class="callout">
+  <strong>欢迎提出后续问题。</strong>如果本课有任何不清楚的地方，或者你想深入了解某个特定代码库的循环，请向你的 agent 老师提问。所有代码库均已克隆并索引在 <code>/home/happy/agent-study/repos/</code>，可以交互式探索。
+</div>
+
+<div class="nav">
+  <span><a href="../reference/agent-harness-dimensions.html">&larr; 参考：架构维度</a></span>
+  <span><a href="0002-tool-system.html">第2课：工具系统 &rarr;</a></span>
+</div>
+
+</body>
+</html>
