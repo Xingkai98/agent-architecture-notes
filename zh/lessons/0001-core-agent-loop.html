@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang');if(s&&s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>第1课：Agent 核心循环 — 思考、行动、观察、重复</title>
@@ -64,9 +65,9 @@
 <body>
 
 <nav class="lang-nav">
-  <a href="../lessons/0001-core-agent-loop.html">EN</a>
+  <a href="#" data-lang="en">EN</a>
   <span>/</span>
-  <a href="../zh/lessons/0001-core-agent-loop.html" class="active">中文</a>
+  <a href="#" data-lang="zh">中文</a>
 </nav>
 
 <h1>第1课：Agent 核心循环</h1>
@@ -408,5 +409,7 @@ while (true) {
   <span><a href="0002-tool-system.html">第2课：工具系统 &rarr;</a></span>
 </div>
 
+
+<script src="../../assets/lang-switcher.js"></script>
 </body>
 </html>

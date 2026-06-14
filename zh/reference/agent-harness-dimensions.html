@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang');if(s&&s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agent Harness 架构维度</title>
@@ -47,9 +48,9 @@
 <body>
 
 <nav class="lang-nav">
-  <a href="../reference/agent-harness-dimensions.html">EN</a>
+  <a href="#" data-lang="en">EN</a>
   <span>/</span>
-  <a href="../zh/reference/agent-harness-dimensions.html" class="active">中文</a>
+  <a href="#" data-lang="zh">中文</a>
 </nav>
 
 <h1>Agent Harness 架构维度</h1>
@@ -160,5 +161,7 @@
   <span><a href="../lessons/0001-core-loop.html">课程 0001：核心循环 &rarr;</a></span>
 </div>
 
+
+<script src="../../assets/lang-switcher.js"></script>
 </body>
 </html>
