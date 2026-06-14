@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Architecture Resources</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="RESOURCES.html" class="active">EN</a>
+  <span>/</span>
+  <a href="zh/RESOURCES.html">中文</a>
+</nav>
+
+<h1>Agent Architecture Resources</h1>
+
+<h2>Primary Codebases</h2>
+
+<h3>Coding Agents</h3>
+
+<ul>
+  <li><strong>openai/codex</strong> — <a href="https://github.com/openai/codex">GitHub</a>. OpenAI's open-source coding agent CLI in Rust (Apache 2.0). ~90k stars. Multi-provider, sandboxed execution, multimodal input.</li>
+  <li><strong>anomalyco/opencode</strong> — <a href="https://github.com/anomalyco/opencode">GitHub</a>. MIT-licensed terminal coding agent. TypeScript server + Go TUI. Client/server architecture, built-in LSP, ACL permissions, plugin system. ~26k stars.</li>
+  <li><strong>badlogic/pi-mono</strong> — <a href="https://github.com/badlogic/pi-mono">GitHub</a>. Minimalist terminal coding harness by Mario Zechner. Four primitive tools (read/write/edit/bash). Philosophy: "primitives, not features."</li>
+  <li><strong>claude-code (mirror)</strong> — <a href="https://github.com/Njengah/claude-code-source-code-leak">GitHub</a>. Claude Code source recovered from npm source map leak. ~1,900 TypeScript files, ~512k LOC.</li>
+</ul>
+
+<h3>General Agents</h3>
+
+<ul>
+  <li><strong>openclaw/openclaw</strong> — <a href="https://github.com/openclaw/openclaw">GitHub</a>. Personal AI assistant, Node/TypeScript. 25+ messaging channels, multi-agent routing, isolated workspaces.</li>
+  <li><strong>NousResearch/hermes-agent</strong> — <a href="https://github.com/NousResearch/hermes-agent">GitHub</a>. Self-evolving AI agent, Python. ~23k stars. Three-layer memory, skill creation from experience, sub-agent parallelism.</li>
+  <li><strong>HKUDS/nanobot</strong> — <a href="https://github.com/HKUDS/nanobot">GitHub</a>. Ultra-lightweight personal AI agent, Python, ~3.5k LOC. Multi-channel, MCP integration, persistent memory.</li>
+</ul>
+
+<h2>Papers</h2>
+
+<h3>Foundational (2022–2023)</h3>
+<ul>
+  <li><a href="https://arxiv.org/abs/2210.03629">ReAct: Synergizing Reasoning and Acting in Language Models</a> — Yao et al., ICLR 2023</li>
+  <li><a href="https://arxiv.org/abs/2303.11366">Reflexion: Language Agents with Verbal Reinforcement Learning</a> — Shinn et al., NeurIPS 2023</li>
+  <li><a href="https://arxiv.org/abs/2305.10601">Tree of Thoughts</a> — Yao et al., NeurIPS 2023</li>
+  <li><a href="https://arxiv.org/abs/2302.04761">Toolformer</a> — Schick et al., NeurIPS 2023</li>
+  <li><a href="https://arxiv.org/abs/2304.03442">Generative Agents</a> — Park et al., ICLR 2023</li>
+  <li><a href="https://arxiv.org/abs/2309.02427">Cognitive Architectures for Language Agents (CoALA)</a> — Sumers et al., TMLR 2023</li>
+</ul>
+
+<h3>Surveys (2023–2025)</h3>
+<ul>
+  <li><a href="https://arxiv.org/abs/2308.11432">A Survey on LLM-based Autonomous Agents</a> — Wang et al.</li>
+  <li><a href="https://arxiv.org/abs/2309.07864">The Rise and Potential of LLM Based Agents</a> — Xi et al.</li>
+  <li><a href="https://arxiv.org/abs/2404.11584">The Landscape of Emerging AI Agent Architectures</a> — Masterman et al., 2024</li>
+  <li><a href="https://arxiv.org/abs/2503.21460">Large Language Model Agent: A Survey</a> — Luo et al., 2025</li>
+  <li><a href="https://arxiv.org/abs/2402.02716">Understanding the Planning of LLM Agents</a> — Huang et al., 2024</li>
+  <li><a href="https://arxiv.org/abs/2404.13543">A Survey on the Memory Mechanism of LLM-based Agents</a> — Zhang et al., 2024</li>
+</ul>
+
+<h2>Books</h2>
+<ul>
+  <li><a href="https://github.com/Mathews-Tom/Agentic-Design-Patterns">Agentic Design Patterns</a> — Gulli &amp; Sauco (2024–2025). 21 patterns, free on GitHub.</li>
+  <li><a href="https://www.oreilly.com/library/view/building-applications-with/9781098163532/">Building Applications with AI Agents</a> — Michael Albada (O'Reilly, 2025).</li>
+  <li><a href="https://www.amazon.com/dp/B0DR3B5X6V">AI Agent System Design</a> — Julian F. Faraday (2025).</li>
+  <li><a href="https://www.amazon.com/dp/B0F2VH6ZK5">AI Agent Architecture: A Practical Guide to MCP</a> — Domenic D. Wood (2025).</li>
+</ul>
+
+<h2>Gaps</h2>
+<ul>
+  <li>No comprehensive comparative analysis of the agent harness design space across these specific codebases exists — that is what this learning track will produce.</li>
+  <li>No book-length treatment of agent harness architecture (as distinct from agent application development) was found.</li>
+  <li>The pi-mono codebase has limited documentation beyond the README — architecture understanding requires direct code reading.</li>
+</ul>
+
+<div class="nav">
+  <span><a href="MISSION.html">&larr; Mission</a></span>
+  <span><a href="index.html">Home &uarr;</a></span>
+</div>
+
+</body>
+</html>

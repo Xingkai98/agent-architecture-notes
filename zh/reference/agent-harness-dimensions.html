@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Harness 架构维度</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  :root {
+    --bg: #fffff8;
+    --text: #111;
+    --muted: #666;
+    --accent: #a00;
+    --rule: #ddd;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem 6rem;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+  h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.35rem; margin: 2rem 0 0.5rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  h3 { font-size: 1.1rem; margin: 1.2rem 0 0.4rem; }
+  p, li { font-size: 0.95rem; margin-bottom: 0.5rem; }
+  ul { padding-left: 1.5rem; margin-bottom: 1rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 1.5rem; }
+  .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.88rem; }
+  th, td { padding: 0.4rem 0.6rem; text-align: left; border-bottom: 1px solid var(--rule); }
+  th { font-weight: 600; background: #f8f8f0; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; }
+  em { font-style: italic; }
+  code { font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.88rem; background: #f4f4f0; padding: 0.1em 0.3em; border-radius: 2px; }
+  a { color: var(--accent); }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .lang-nav { font-size: 0.85rem; margin-bottom: 1.5rem; color: var(--muted); }
+  .lang-nav a { color: var(--accent); text-decoration: none; }
+  .lang-nav a.active { color: var(--text); font-weight: 600; text-decoration: none; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="../reference/agent-harness-dimensions.html">EN</a>
+  <span>/</span>
+  <a href="../zh/reference/agent-harness-dimensions.html" class="active">中文</a>
+</nav>
+
+<h1>Agent Harness 架构维度</h1>
+<p class="subtitle">定义 Agent 系统架构的设计维度分类体系。</p>
+<p class="meta">参考文档，2026-06-13。基于对 7 个生产级代码库的分析。</p>
+
+<h2>1. 核心循环（Core Loop）</h2>
+<p>最基础的执行循环：Agent 如何接收输入、调用 LLM、执行工具（Tool）并决定继续或停止。每个 Agent 都具备此机制。</p>
+
+<h3>关键设计决策</h3>
+<ul>
+  <li><strong>循环嵌套深度：</strong>从单层（claude-code）到四层（codex）。层级越多，关注点分离越清晰，但需要追踪的控制流也更复杂。</li>
+  <li><strong>状态表示：</strong>通过迭代传递的可变状态 vs. 事件流 vs. 原地修改消息列表。</li>
+  <li><strong>工具执行时机：</strong>在流式输出完成后执行（批量模式）vs. 在流式输出过程中执行（流式执行器）。</li>
+  <li><strong>轮次门控（Turn Gating）：</strong>什么构成一个"轮次"？有些 Agent 区分"轮次"（一次 LLM 调用 + 工具结果）和"迭代"（单次 LLM 调用）。</li>
+</ul>
+
+<h3>代码库链接</h3>
+<ul>
+  <li>pi-mono: <a href="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent-loop.ts"><code>packages/agent/src/agent-loop.ts</code> — runLoop()</a></li>
+  <li>nanobot: <a href="https://github.com/HKUDS/nanobot/blob/main/nanobot/agent/loop.py"><code>nanobot/agent/loop.py</code> — AgentLoop.run()</a></li>
+  <li>codex: <a href="https://github.com/openai/codex/blob/main/codex-rs/core/src/session/turn.rs"><code>codex-rs/core/src/session/turn.rs</code> — run_turn()</a></li>
+  <li>opencode: <a href="https://github.com/anomalyco/opencode/blob/main/packages/core/src/session/runner/llm.ts"><code>packages/core/src/session/runner/llm.ts</code> — run()</a></li>
+  <li>openclaw: <a href="https://github.com/openclaw/openclaw/blob/main/packages/agent-core/src/agent-loop.ts"><code>packages/agent-core/src/agent-loop.ts</code> — runLoop()</a></li>
+  <li>claude-code: <a href="path/to/claude-code/src/query.ts"><code>src/query.ts</code> — queryLoop()</a></li>
+  <li>hermes-agent: <a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/conversation_loop.py"><code>agent/conversation_loop.py</code> — run_conversation()</a></li>
+</ul>
+
+<h2>2. 工具系统（Tool System）</h2>
+<p>工具如何被定义（Schema）、发现（注册表/Registry）、调用（调度/Dispatch），以及其结果如何被规范化处理后反馈给 LLM。</p>
+
+<h3>关键设计决策</h3>
+<ul>
+  <li><strong>并发模型：</strong>仅顺序执行 vs. 批量并行（<code>Promise.all</code> / <code>asyncio.gather</code> / <code>FuturesOrdered</code>）vs. 流式执行器（工具在 LLM 流式输出期间运行）。</li>
+  <li><strong>工具注册：</strong>硬编码枚举 vs. 基于插件/MCP 的发现机制 vs. 文件系统扫描。</li>
+  <li><strong>结果规范化：</strong>大小截断、大结果的文件卸载、用于短路循环的"终止"标志。</li>
+  <li><strong>沙箱（Sandboxing）：</strong>工具在哪个层级实现沙箱隔离？工具级别（bash 沙箱）、进程级别，还是容器级别？</li>
+</ul>
+
+<h2>3. 上下文管理（Context Management）</h2>
+<p>对话上下文（发送给 LLM 的消息）如何被组合、管理和压缩以保持在模型的上下文窗口（Context Window）之内。</p>
+
+<h3>关键设计决策</h3>
+<ul>
+  <li><strong>压缩（Compaction）策略：</strong>主动式（在溢出前压缩）vs. 被动式（收到 413 错误后压缩）。摘要 vs. 截断 vs. 微压缩。</li>
+  <li><strong>系统提示词（System Prompt）组合：</strong>静态基础部分 + 动态注入（记忆、技能、运行时上下文）vs. 单一模板。</li>
+  <li><strong>消息预算：</strong>每条消息的大小上限、工具结果截断、从头部裁剪对话历史。</li>
+  <li><strong>缓存控制：</strong>提示词的哪些部分被缓存？因提供商而异（Anthropic 断点标记 vs. 自动缓存）。</li>
+</ul>
+
+<h2>4. 权限与安全模型（Permission &amp; Safety Model）</h2>
+<p>Agent 如何决定哪些操作是允许的，以及使用什么机制来执行这些决策。</p>
+
+<h3>关键设计决策</h3>
+<ul>
+  <li><strong>审批（Approval）模式：</strong>始终询问（交互式）vs. 自动批准（沙箱）vs. 基于 ACL（按工具/路径授权）。</li>
+  <li><strong>沙箱：</strong>无沙箱（信任模型）vs. 目录限制 vs. 禁用网络 vs. 完全容器隔离。</li>
+  <li><strong>权限持久化：</strong>会话级别 vs. 跨会话持久化 vs. 层级式（项目 -> 用户 -> 全局）。</li>
+  <li><strong>护栏（Guardrails）：</strong>工具执行前钩子、工具执行后验证、内容过滤器、工作区边界执行。</li>
+</ul>
+
+<h2>5. 记忆架构（Memory Architecture）</h2>
+<p>Agent 如何跨会话持久化状态——用户偏好、项目约定、学习到的技能、对话历史。</p>
+
+<h3>关键设计决策</h3>
+<ul>
+  <li><strong>记忆层级（Memory Tiers）：</strong>工作记忆（上下文内）vs. 短期记忆（会话历史）vs. 长期记忆（持久化文件/数据库）。</li>
+  <li><strong>存储格式：</strong>Markdown 文件（MEMORY.md、USER.md）vs. SQLite/向量数据库 vs. JSON Blob。</li>
+  <li><strong>整合（Consolidation）：</strong>何时以及如何对记忆进行回顾、摘要和修剪？自动（后台）vs. 手动。</li>
+  <li><strong>技能创建：</strong>Agent 能否从经验中创建新的可复用技能？（hermes-agent 的标志性特性）。</li>
+</ul>
+
+<h2>6. 子 Agent 与委托（Sub-agent &amp; Delegation）</h2>
+<p>如何将工作拆分到多个 Agent 实例中——派生、通信、结果收集。</p>
+
+<h3>关键设计决策</h3>
+<ul>
+  <li><strong>派生（Spawn）模型：</strong>同一进程内（函数调用）vs. 子进程 vs. 远程/容器。</li>
+  <li><strong>隔离（Isolation）：</strong>共享上下文（消息对父 Agent 可见）vs. 沙箱化（仅返回最终结果）。</li>
+  <li><strong>并发：</strong>顺序委托 vs. 并行子 Agent 扇出（Fan-out）。</li>
+  <li><strong>预算（Budget）：</strong>子 Agent 是否有自己的 Token/轮次预算？（hermes-agent：是，每个子 Agent 有独立的 IterationBudget）。</li>
+</ul>
+
+<h2>7. UI / 传输层（UI / Transport Layer）</h2>
+<p>用户如何与 Agent 交互——终端 UI、Web、消息渠道、API。</p>
+
+<h3>关键设计决策</h3>
+<ul>
+  <li><strong>界面范式：</strong>REPL（交互式终端）vs. 一次性调用（CLI 参数）vs. 守护进程（后台）vs. 聊天（消息收发）。</li>
+  <li><strong>渲染：</strong>TUI 库（Ink、Bubble Tea、Textual、自定义）vs. 纯标准输出 vs. Web UI vs. 移动端。</li>
+  <li><strong>多渠道：</strong>单一界面 vs. 统一网关（openclaw：25+ 渠道；hermes-agent：多平台）。</li>
+  <li><strong>客户端/服务器分离：</strong>单体进程 vs. 独立服务器 + 客户端（opencode：Go TUI + TypeScript 服务器）。</li>
+</ul>
+
+<h2>8. 错误恢复与韧性（Error Recovery &amp; Resilience）</h2>
+<p>Agent 如何处理故障——API 错误、上下文溢出、格式错误的响应、工具执行失败。</p>
+
+<h3>关键设计决策</h3>
+<ul>
+  <li><strong>LLM 错误恢复：</strong>带退避的重试 vs. 模型回退（Fallback）vs. 提供商回退。</li>
+  <li><strong>上下文溢出：</strong>自动压缩 vs. 被动压缩（收到 413 后）vs. 折叠排空（移除最早的轮次）。</li>
+  <li><strong>格式错误的工具调用：</strong>验证并重试（hermes-agent：对无效 JSON、无效工具名进行 3 次尝试）vs. 静默注入错误结果。</li>
+  <li><strong>输出截断：</strong>达到最大 Token 数后的恢复（注入继续消息）vs. 提升 Token 限制 vs. 接受部分结果。</li>
+</ul>
+
+<div class="nav">
+  <span>&larr; 参考索引</span>
+  <span><a href="../lessons/0001-core-loop.html">课程 0001：核心循环 &rarr;</a></span>
+</div>
+
+</body>
+</html>
