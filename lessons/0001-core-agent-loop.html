@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0001: The Core Agent Loop — think, act, observe, repeat</title>
+<style>
+  :root {
+    --bg: #fffff8;
+    --text: #111;
+    --muted: #666;
+    --accent: #a00;
+    --rule: #ddd;
+    --code-bg: #f4f4f0;
+    --highlight: #fffacd;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem 6rem;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+  h1 { font-size: 2rem; margin-bottom: 0.15rem; }
+  h2 { font-size: 1.35rem; margin: 2.2rem 0 0.6rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  h3 { font-size: 1.08rem; margin: 1.5rem 0 0.5rem; }
+  p { font-size: 0.95rem; margin-bottom: 0.8rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+  li { font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.25rem; }
+  .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; font-style: italic; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; margin-bottom: 0.5rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.85rem; }
+  th, td { padding: 0.45rem 0.55rem; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; background: #f8f8f0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:nth-child(even) td { background: #fafaf6; }
+  code { font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.87rem; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; margin: 0.8rem 0 1.2rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.45; border-left: 3px solid var(--accent); }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid var(--rule); padding-left: 1rem; margin: 1rem 0; color: var(--muted); font-style: italic; }
+  .figure { margin: 1.5rem 0; }
+  .figure .caption { font-size: 0.82rem; color: var(--muted); margin-top: 0.3rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .quiz { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1.5rem 0; }
+  .quiz h3 { margin-top: 0; }
+  .quiz .question { margin: 1rem 0 0.5rem; font-weight: 600; }
+  .quiz .options { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 1rem; }
+  .quiz .option { padding: 0.35rem 0.6rem; cursor: pointer; border: 1px solid var(--rule); background: #fff; font-size: 0.88rem; }
+  .quiz .option:hover { background: var(--highlight); }
+  .quiz .option.correct { background: #d4edda; border-color: #28a745; }
+  .quiz .option.wrong { background: #f8d7da; border-color: #dc3545; }
+  .quiz .feedback { margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.5rem; }
+  .diagram { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1rem 0; font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.82rem; white-space: pre; line-height: 1.3; overflow-x: auto; }
+  .callout { background: #fffacd; border: 1px solid #e6da8a; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<h1>Lesson 0001: The Core Agent Loop</h1>
+<p class="subtitle">Think, act, observe, repeat — the fundamental architecture of every AI agent.</p>
+<p class="meta">June 2026 · 8 primary sources · <a href="0001-core-loop.html">Permalink</a></p>
+
+<p>Open any agent codebase. The first question to ask is: <em>where is the loop?</em> Every agent — whether it runs in a terminal, a Slack channel, or a Docker container — is built around a single architectural center of gravity: the execution loop that cycles between calling the LLM, running tools, and feeding results back.</p>
+
+<p class="sidenote">CoALA (Sumers et al., 2023) was the first paper to formalize this as a cognitive architecture: a generalized decision loop with modular memory stores and a structured action space. Read it at <a href="https://arxiv.org/abs/2309.02427">arXiv:2309.02427</a>.</p>
+
+<p>This lesson maps that loop across seven production agent codebases — four coding agents (claude-code, codex, opencode, pi-mono) and three general agents (hermes-agent, openclaw, nanobot). We'll see two fundamental architectures emerge, and understand the tradeoffs that push teams toward one or the other.</p>
+
+<h2>The universal skeleton</h2>
+
+<p>Strip away the CLI, the chat channels, the plugins and sandboxes. Every agent loop collapses to this:</p>
+
+<div class="diagram">
+┌─────────────────────────────────────────────────────┐
+│  while (should_continue):                           │
+│                                                     │
+│    // THINK phase                                    │
+│    response = await llm.stream({                    │
+│      system: system_prompt,                         │
+│      messages: conversation_history,                │
+│      tools: available_tools,                        │
+│    })                                               │
+│                                                     │
+│    // ACT phase                                      │
+│    if response.has_tool_calls():                    │
+│      for each tool_call:                            │
+│        result = execute(tool_call)                  │
+│        conversation_history.append(result)          │
+│                                                     │
+│    // OBSERVE (results already in history)          │
+│    // Loop continues — next LLM call sees results   │
+│                                                     │
+│    if response.is_text_only():                      │
+│      return response.text  // terminal state        │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+</div>
+
+<p>This is the ReAct pattern (Yao et al., 2022) — interleaved reasoning and action. The LLM reasons about what to do, the agent executes it, and the result is fed back for the next round of reasoning. Nothing more.</p>
+
+<p>But look closer at seven real implementations, and this simple loop fractures into two fundamentally different architectures.</p>
+
+<h2>The two architectures</h2>
+
+<h3>Architecture A: Nested Two-Loop</h3>
+
+<p>Used by: <strong>pi-mono, openclaw</strong> (and likely inherited in part by opencode).</p>
+
+<p>An <em>outer loop</em> handles follow-up messages (user interrupts, queued commands that arrive after the agent would otherwise stop). An <em>inner loop</em> runs the actual think-act-observe turns:</p>
+
+<div class="diagram">
+// pi-mono: packages/agent/src/agent-loop.ts, runLoop()
+// openclaw: packages/agent-core/src/agent-loop.ts, runLoop()
+//
+// (These two are structurally identical — openclaw's is a fork.)
+
+while (true) {                        // OUTER: follow-up loop
+  while (hasMoreToolCalls              // INNER: tool turn loop
+         || pendingMessages > 0) {
+    message = await streamAssistant()  // THINK
+    toolCalls = executeTools(message)  // ACT
+    hasMoreToolCalls = !allTerminate   // OBSERVE → decide
+  }
+  followUps = getFollowUpMessages()
+  if (followUps.length === 0) break   // terminal state
+  pendingMessages = followUps
+}
+</div>
+
+<p><strong>Why this design?</strong> Follow-up messages are a common pattern: the user interrupts mid-run ("no, use a different approach"), or a sub-agent completes and its results need to be injected. By separating follow-up handling into its own outer loop, the inner loop can focus purely on the think-act-observe cycle without checking for external interruptions on every iteration.</p>
+
+<p class="sidenote">pi-mono and openclaw share this architecture because openclaw's agent-core package is a direct descendant of pi's agent package. The code lineages matter.</p>
+
+<h3>Architecture B: Flat While-True</h3>
+
+<p>Used by: <strong>claude-code, hermes-agent</strong>. A single <code>while (true)</code> loop with all concerns — tool execution, follow-up injection, recovery — handled as branches within one iteration.</p>
+
+<div class="diagram">
+// claude-code: src/query.ts, queryLoop()
+// hermes-agent: agent/conversation_loop.py, run_conversation()
+
+while (true) {
+  // Phase A: Context prep (compaction, budget checks)
+  prepareContext(state)
+
+  // Phase B: THINK — stream LLM response
+  for await (event of streamModel(state)) {
+    if (event.type === 'tool_use')
+      startToolExecution(event)  // may run during streaming
+  }
+
+  // Phase C: No tools? → check stop hooks, token budget, return
+  if (!needsFollowUp) {
+    runStopHooks()
+    if (ok) return { reason: 'completed' }
+  }
+
+  // Phase D: ACT — execute remaining tools
+  if (needsFollowUp) {
+    await executeAllTools()
+    // Phase E: OBSERVE — collect results, refresh, continue
+    state = nextState(state, toolResults)
+    continue  // back to top of while(true)
+  }
+}
+</div>
+
+<p><strong>Why this design?</strong> When recovery logic is complex — prompt-too-long, max_output_tokens, reactive compaction, model fallback, abort handling — a flat loop with explicit phases is easier to reason about than nested loops where different recovery paths exit at different levels. Claude Code's loop has <em>twelve</em> distinct terminal reasons (query.ts lines 1050–1720); each is a <code>return { reason: '...' }</code> at the right point in the flat sequence.</p>
+
+<h3>A third variant: Layered State Machine</h3>
+
+<p>Used by: <strong>nanobot</strong>. Instead of nested loops or a flat while-true, nanobot uses an explicit state machine with 7 states (RESTORE → COMPACT → COMMAND → BUILD → RUN → SAVE → RESPOND → DONE). Within the RUN state, a separate <code>for iteration in range(max_iterations)</code> loop handles the think-act cycle.</p>
+
+<p>Used by: <strong>codex</strong> (Rust). Four distinct loop layers — submission_loop, task loop, turn loop, sampling loop — each with its own termination condition. The turn loop calls <code>run_sampling_request()</code> which internally streams the LLM response, drains in-flight tool futures via <code>FuturesOrdered</code>, and determines <code>needs_follow_up</code>.</p>
+
+<p>Used by: <strong>opencode</strong>. Uses Effect-TS fibers rather than raw async/await. The <code>run()</code> function is an <code>Effect.fn</code> generator with a <code>for (let step = 0; step &lt; MAX_STEPS; step++)</code> loop inside a <code>while (openActivity)</code> outer guard.</p>
+
+<h2>Comparative table</h2>
+
+<table>
+  <tr>
+    <th>Dimension</th>
+    <th>pi-mono</th>
+    <th>openclaw</th>
+    <th>claude-code</th>
+    <th>hermes-agent</th>
+    <th>nanobot</th>
+    <th>codex</th>
+    <th>opencode</th>
+  </tr>
+  <tr>
+    <td><strong>Loop architecture</strong></td>
+    <td>Nested 2-loop</td>
+    <td>Nested 2-loop</td>
+    <td>Flat while-true</td>
+    <td>Flat while + retry</td>
+    <td>State machine + for-loop</td>
+    <td>4-layer nested</td>
+    <td>Outer while + inner for</td>
+  </tr>
+  <tr>
+    <td><strong>Loop nesting</strong></td>
+    <td>2 levels</td>
+    <td>2 levels</td>
+    <td>1 level</td>
+    <td>2 levels</td>
+    <td>3 levels</td>
+    <td>4 levels</td>
+    <td>2 levels</td>
+  </tr>
+  <tr>
+    <td><strong>State management</strong></td>
+    <td>Event stream</td>
+    <td>Event stream</td>
+    <td>Mutable State struct</td>
+    <td>In-place message list</td>
+    <td>AgentRunSpec ctx</td>
+    <td>Immutable history clone</td>
+    <td>Durable DB + fibers</td>
+  </tr>
+  <tr>
+    <td><strong>Tool timing</strong></td>
+    <td>After stream</td>
+    <td>After stream</td>
+    <td>During stream (opt)</td>
+    <td>After stream</td>
+    <td>After stream</td>
+    <td>During stream</td>
+    <td>Both (configurable)</td>
+  </tr>
+  <tr>
+    <td><strong>Concurrency</strong></td>
+    <td>async/await + EventStream</td>
+    <td>async/await + EventStream</td>
+    <td>Async generator</td>
+    <td>Sync + bg threads</td>
+    <td>asyncio + tasks</td>
+    <td>Tokio async</td>
+    <td>Effect-TS fibers</td>
+  </tr>
+  <tr>
+    <td><strong>Max iterations</strong></td>
+    <td>Unbounded (follow-up driven)</td>
+    <td>Unbounded (follow-up driven)</td>
+    <td>maxTurns config</td>
+    <td>max_iterations (90)</td>
+    <td>max_iterations</td>
+    <td>Unbounded (input-driven)</td>
+    <td>MAX_STEPS (25)</td>
+  </tr>
+  <tr>
+    <td><strong>Recovery complexity</strong></td>
+    <td>Low (retry+error)</td>
+    <td>Medium (model fallback)</td>
+    <td><strong>Very high</strong></td>
+    <td><strong>Very high</strong></td>
+    <td>Medium</td>
+    <td>Medium</td>
+    <td>Low (Effect recovery)</td>
+  </tr>
+  <tr>
+    <td><strong>Primary source</strong></td>
+    <td><code>agent-loop.ts:155</code></td>
+    <td><code>agent-loop.ts:258</code></td>
+    <td><code>query.ts:241</code></td>
+    <td><code>conversation_loop.py:371</code></td>
+    <td><code>loop.py:867</code></td>
+    <td><code>turn.rs:137</code></td>
+    <td><code>llm.ts:373</code></td>
+  </tr>
+</table>
+
+<h2>The fundamental tradeoff: nesting depth</h2>
+
+<p>Why does codex have 4 loop levels while claude-code has 1? This is not an accident — it reflects different priorities:</p>
+
+<p><strong>More nesting = more separation of concerns.</strong> Codex's four levels each handle one thing: the submission_loop manages the session lifecycle, the task loop manages task lifecycle (abort/restart), the turn loop manages the think-act cycle, and the sampling loop manages retries. Each level can be tested and reasoned about independently.</p>
+
+<p><strong>Less nesting = easier to see all terminal paths.</strong> Claude Code's single flat loop makes all twelve exit conditions visible in one function. When recovery logic is as complex as it is in Claude Code (prompt-too-long → collapse drain → reactive compact → escalate max tokens → inject recovery message → finally return error), flattening the loop makes it harder to miss a recovery path.</p>
+
+<div class="callout">
+  <strong>Design heuristic:</strong> If your recovery logic is simple (retry on error, abort on signal), nested loops work well. If your recovery logic involves cascading fallbacks across multiple dimensions (context size, token budget, model availability, stop hooks), flatten the loop so all paths are visible in one place.
+</div>
+
+<h2>Another key dimension: when do tools execute?</h2>
+
+<p>Two camps:</p>
+
+<ol>
+  <li><strong>Batch execution</strong> (pi-mono, openclaw, nanobot, hermes-agent): Wait for the LLM stream to complete, collect all tool calls, then execute them. Simple to implement, but tools that could have started running 5 seconds ago sit idle while the model finishes generating.</li>
+  <li><strong>Streaming execution</strong> (claude-code, codex): Execute tools <em>as soon as</em> the model emits them in the stream. Tools run concurrently with the rest of the model's response. Reduces latency but requires careful state management — what happens when a tool result arrives before the model has finished streaming?</li>
+</ol>
+
+<p class="sidenote">Claude Code's StreamingToolExecutor starts tools immediately when content_block_start fires for a tool_use block, but tracks in-progress results so they can be yielded to the loop at the right point in the turn cycle.</p>
+
+<p>This connects to a deeper design question about the <strong>tool execution model</strong> itself — covered in <a href="0002-tool-system.html">Lesson 0002: Tool System</a>.</p>
+
+<h2>Exercise: Identify the loop</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>Quiz</h3>
+  <p style="margin-bottom:0.8rem;">Each question has exactly one correct answer. Answers are the same length to avoid giving clues.</p>
+
+  <div class="question">Q1. Which codebase uses a 7-state explicit state machine (RESTORE→COMPACT→...→DONE) instead of nested loops?</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">hermes-agent</div>
+    <div class="option" data-q="1" data-a="b">nanobot</div>
+    <div class="option" data-q="1" data-a="c">pi-mono</div>
+    <div class="option" data-q="1" data-a="d">codex</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. What is the primary reason Claude Code uses a flat while-true loop rather than nested loops?</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">Performance optimization</div>
+    <div class="option" data-q="2" data-a="b">Simpler code structure</div>
+    <div class="option" data-q="2" data-a="c">Complex recovery paths</div>
+    <div class="option" data-q="2" data-a="d">Legacy compatibility</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. In codex's 4-layer architecture, which layer contains the actual think-act-observe cycle?</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">submission_loop</div>
+    <div class="option" data-q="3" data-a="b">task loop</div>
+    <div class="option" data-q="3" data-a="c">turn loop</div>
+    <div class="option" data-q="3" data-a="d">sampling loop</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function() {
+  const answers = { 1: 'b', 2: 'c', 3: 'c' };
+  document.querySelectorAll('.option').forEach(opt => {
+    opt.addEventListener('click', function() {
+      const q = this.dataset.q;
+      const a = this.dataset.a;
+      const feedback = document.getElementById('feedback' + q);
+      const siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(s => s.classList.remove('correct', 'wrong'));
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ Correct.';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ Not quite — re-read the relevant section above.';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>What we haven't covered</h2>
+
+<p>This lesson focused on the <em>loop structure</em> — the skeletal control flow. We deliberately deferred:</p>
+<ul>
+  <li><strong>Tool execution semantics</strong> — how tools are defined, dispatched, and sandboxed (<a href="0002-tool-system.html">Lesson 0002</a>)</li>
+  <li><strong>Context composition and compaction</strong> — how the system prompt and message history are built and managed (<a href="0003-context-management.html">Lesson 0003</a>)</li>
+  <li><strong>Permission and safety</strong> — what the agent is allowed to do (<a href="0004-permission-model.html">Lesson 0004</a>)</li>
+  <li><strong>Sub-agent spawning</strong> — how the loop changes when work is delegated (<a href="0006-subagents.html">Lesson 0006</a>)</li>
+</ul>
+
+<h2>Primary sources</h2>
+
+<p>Every claim in this lesson is grounded in actual code. Read the source files:</p>
+<ol>
+  <li><strong>pi-mono</strong>: <a href="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent-loop.ts#L155"><code>agent-loop.ts</code> — <code>runLoop()</code> (line 155)</a> and <code>streamAssistantResponse()</code> (line 275)</li>
+  <li><strong>openclaw</strong>: <a href="https://github.com/openclaw/openclaw/blob/main/packages/agent-core/src/agent-loop.ts#L258"><code>agent-loop.ts</code> — <code>runLoop()</code> (line 258)</a></li>
+  <li><strong>claude-code</strong>: <code>src/query.ts</code> — <code>queryLoop()</code> (line 241), State type (line 204)</li>
+  <li><strong>hermes-agent</strong>: <a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/conversation_loop.py#L371"><code>conversation_loop.py</code> — <code>run_conversation()</code> (line 371)</a></li>
+  <li><strong>nanobot</strong>: <a href="https://github.com/HKUDS/nanobot/blob/main/nanobot/agent/loop.py#L867"><code>loop.py</code> — <code>AgentLoop.run()</code> (line 867)</a></li>
+  <li><strong>codex</strong>: <a href="https://github.com/openai/codex/blob/main/codex-rs/core/src/session/turn.rs#L137"><code>turn.rs</code> — <code>run_turn()</code> (line 137)</a></li>
+  <li><strong>opencode</strong>: <a href="https://github.com/anomalyco/opencode/blob/main/packages/core/src/session/runner/llm.ts#L373"><code>llm.ts</code> — <code>run()</code> (line 373)</a></li>
+  <li><strong>CoALA paper</strong>: <a href="https://arxiv.org/abs/2309.02427">Sumers et al., "Cognitive Architectures for Language Agents" (2023)</a></li>
+  <li><strong>ReAct paper</strong>: <a href="https://arxiv.org/abs/2210.03629">Yao et al., "ReAct: Synergizing Reasoning and Acting in Language Models" (2022)</a></li>
+</ol>
+
+<h2>Recommended next reading</h2>
+<p>Before the next lesson, open one of these files and trace the loop yourself:</p>
+<ul>
+  <li>If you want the <strong>minimal</strong> version: <code>pi-mono/packages/agent/src/agent-loop.ts</code> — the entire runLoop() is ~115 lines, and it's the cleanest expression of the nested two-loop architecture.</li>
+  <li>If you want the <strong>most sophisticated</strong> version: <code>claude-code/src/query.ts</code> — the queryLoop() is ~1,500 lines and shows every recovery path, budget check, and streaming optimization that a production agent needs.</li>
+  <li>If you want the <strong>different paradigm</strong> version: <code>nanobot/nanobot/agent/loop.py</code> — the explicit state machine is a refreshing alternative to raw loops.</li>
+</ul>
+
+<div class="callout">
+  <strong>Ask followup questions.</strong> If anything in this lesson is unclear, or you want to go deeper on a specific codebase's loop, ask your agent teacher. The codebases are all cloned and indexed at <code>/home/happy/agent-study/repos/</code> and can be explored interactively.
+</div>
+
+<div class="nav">
+  <span><a href="../reference/agent-harness-dimensions.html">&larr; Reference: Architectural Dimensions</a></span>
+  <span><a href="0002-tool-system.html">Lesson 0002: Tool System &rarr;</a></span>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Harness Architectural Dimensions</title>
+<style>
+  :root {
+    --bg: #fffff8;
+    --text: #111;
+    --muted: #666;
+    --accent: #a00;
+    --rule: #ddd;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem 6rem;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+  h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.35rem; margin: 2rem 0 0.5rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  h3 { font-size: 1.1rem; margin: 1.2rem 0 0.4rem; }
+  p, li { font-size: 0.95rem; margin-bottom: 0.5rem; }
+  ul { padding-left: 1.5rem; margin-bottom: 1rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 1.5rem; }
+  .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.88rem; }
+  th, td { padding: 0.4rem 0.6rem; text-align: left; border-bottom: 1px solid var(--rule); }
+  th { font-weight: 600; background: #f8f8f0; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; }
+  em { font-style: italic; }
+  code { font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.88rem; background: #f4f4f0; padding: 0.1em 0.3em; border-radius: 2px; }
+  a { color: var(--accent); }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<h1>Agent Harness Architectural Dimensions</h1>
+<p class="subtitle">A taxonomy of the design axes that define an agent system's architecture.</p>
+<p class="meta">Reference document, 2026-06-13. Based on analysis of 7 production codebases.</p>
+
+<h2>1. Core Loop</h2>
+<p>The fundamental execution cycle: how the agent receives input, calls the LLM, executes tools, and decides to continue or stop. Every agent has this.</p>
+
+<h3>Key Design Decisions</h3>
+<ul>
+  <li><strong>Loop nesting depth:</strong> Single-level (claude-code) to 4-level (codex). More levels = more separation of concerns but more control flow to trace.</li>
+  <li><strong>State representation:</strong> Mutable state passed through iterations vs. event stream vs. in-place message list mutation.</li>
+  <li><strong>Tool execution timing:</strong> After stream completes (batch) vs. during stream (streaming executor).</li>
+  <li><strong>Turn gating:</strong> What constitutes a "turn"? Some agents distinguish "turns" (LLM call + tool results) from "iterations" (single LLM call).</li>
+</ul>
+
+<h3>Codebase Links</h3>
+<ul>
+  <li>pi-mono: <a href="https://github.com/badlogic/pi-mono/blob/main/packages/agent/src/agent-loop.ts"><code>packages/agent/src/agent-loop.ts</code> — runLoop()</a></li>
+  <li>nanobot: <a href="https://github.com/HKUDS/nanobot/blob/main/nanobot/agent/loop.py"><code>nanobot/agent/loop.py</code> — AgentLoop.run()</a></li>
+  <li>codex: <a href="https://github.com/openai/codex/blob/main/codex-rs/core/src/session/turn.rs"><code>codex-rs/core/src/session/turn.rs</code> — run_turn()</a></li>
+  <li>opencode: <a href="https://github.com/anomalyco/opencode/blob/main/packages/core/src/session/runner/llm.ts"><code>packages/core/src/session/runner/llm.ts</code> — run()</a></li>
+  <li>openclaw: <a href="https://github.com/openclaw/openclaw/blob/main/packages/agent-core/src/agent-loop.ts"><code>packages/agent-core/src/agent-loop.ts</code> — runLoop()</a></li>
+  <li>claude-code: <a href="path/to/claude-code/src/query.ts"><code>src/query.ts</code> — queryLoop()</a></li>
+  <li>hermes-agent: <a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/conversation_loop.py"><code>agent/conversation_loop.py</code> — run_conversation()</a></li>
+</ul>
+
+<h2>2. Tool System</h2>
+<p>How tools are defined (schema), discovered (registry), called (dispatch), and how their results are normalized and fed back to the LLM.</p>
+
+<h3>Key Design Decisions</h3>
+<ul>
+  <li><strong>Concurrency model:</strong> Sequential-only vs. batch-parallel (<code>Promise.all</code> / <code>asyncio.gather</code> / <code>FuturesOrdered</code>) vs. streaming-executor (tools run during LLM streaming).</li>
+  <li><strong>Tool registration:</strong> Hardcoded enum vs. plugin/MCP-based discovery vs. file-system scanning.</li>
+  <li><strong>Result normalization:</strong> Size truncation, file offloading for large results, "terminate" flag for short-circuiting the loop.</li>
+  <li><strong>Sandboxing:</strong> At what layer are tools sandboxed? Tool-level (bash sandbox), process-level, or container-level?</li>
+</ul>
+
+<h2>3. Context Management</h2>
+<p>How the conversation context (messages sent to the LLM) is composed, managed, and compacted to stay within the model's context window.</p>
+
+<h3>Key Design Decisions</h3>
+<ul>
+  <li><strong>Compaction strategy:</strong> Proactive (before overflow) vs. reactive (after 413 error). Summarization vs. truncation vs. micro-compaction.</li>
+  <li><strong>System prompt composition:</strong> Static base + dynamic injection (memory, skills, runtime context) vs. monolithic template.</li>
+  <li><strong>Message budget:</strong> Per-message size caps, tool result truncation, conversation history snipping from head.</li>
+  <li><strong>Cache control:</strong> Which parts of the prompt are cached? Varies by provider (Anthropic breakpoints vs. automatic).</li>
+</ul>
+
+<h2>4. Permission &amp; Safety Model</h2>
+<p>How the agent decides what actions are allowed, and what mechanisms enforce those decisions.</p>
+
+<h3>Key Design Decisions</h3>
+<ul>
+  <li><strong>Approval model:</strong> Always-ask (interactive) vs. auto-approve (sandbox) vs. ACL-based (permissions per tool/path).</li>
+  <li><strong>Sandboxing:</strong> None (trust model) vs. directory-restricted vs. network-disabled vs. full container isolation.</li>
+  <li><strong>Permission persistence:</strong> Session-scoped vs. durable across sessions vs. hierarchical (project then user then global).</li>
+  <li><strong>Guardrails:</strong> Pre-tool hooks, post-tool validation, content filters, workspace-boundary enforcement.</li>
+</ul>
+
+<h2>5. Memory Architecture</h2>
+<p>How the agent persists state across sessions — user preferences, project conventions, learned skills, conversation history.</p>
+
+<h3>Key Design Decisions</h3>
+<ul>
+  <li><strong>Memory tiers:</strong> Working memory (in-context) vs. short-term (session history) vs. long-term (durable files/DB).</li>
+  <li><strong>Storage format:</strong> Markdown files (MEMORY.md, USER.md) vs. SQLite/vector DB vs. JSON blobs.</li>
+  <li><strong>Consolidation:</strong> When and how is memory reviewed, summarized, and pruned? Automatic (background) vs. manual.</li>
+  <li><strong>Skill creation:</strong> Can the agent create new reusable skills from experience? (hermes-agent's defining feature).</li>
+</ul>
+
+<h2>6. Sub-agent &amp; Delegation</h2>
+<p>How work is split across multiple agent instances — spawning, communication, result collection.</p>
+
+<h3>Key Design Decisions</h3>
+<ul>
+  <li><strong>Spawn model:</strong> Same-process (function call) vs. child process vs. remote/container.</li>
+  <li><strong>Isolation:</strong> Shared context (messages visible to parent) vs. sandboxed (only final result returned).</li>
+  <li><strong>Concurrency:</strong> Sequential delegation vs. parallel sub-agent fan-out.</li>
+  <li><strong>Budget:</strong> Do sub-agents have their own token/turn budgets? (hermes-agent: yes, separate IterationBudget per sub-agent).</li>
+</ul>
+
+<h2>7. UI / Transport Layer</h2>
+<p>How the user interacts with the agent — terminal UI, web, messaging channels, API.</p>
+
+<h3>Key Design Decisions</h3>
+<ul>
+  <li><strong>Interface paradigm:</strong> REPL (interactive terminal) vs. one-shot (CLI arg) vs. daemon (background) vs. chat (messaging).</li>
+  <li><strong>Rendering:</strong> TUI library (Ink, Bubble Tea, Textual, custom) vs. plain stdout vs. web UI vs. mobile.</li>
+  <li><strong>Multi-channel:</strong> Single interface vs. unified gateway (openclaw: 25+ channels; hermes-agent: multi-platform).</li>
+  <li><strong>Client/server split:</strong> Monolithic process vs. separate server + client (opencode: Go TUI + TypeScript server).</li>
+</ul>
+
+<h2>8. Error Recovery &amp; Resilience</h2>
+<p>How the agent handles failures — API errors, context overflow, malformed responses, tool failures.</p>
+
+<h3>Key Design Decisions</h3>
+<ul>
+  <li><strong>LLM error recovery:</strong> Retry with backoff vs. model fallback vs. provider fallback.</li>
+  <li><strong>Context overflow:</strong> Auto-compaction vs. reactive compact (after 413) vs. collapse drain (remove oldest turns).</li>
+  <li><strong>Malformed tool calls:</strong> Validate and retry (hermes-agent: 3 attempts for invalid JSON, invalid tool names) vs. silently inject error results.</li>
+  <li><strong>Truncated output:</strong> Max-tokens recovery (inject continuation message) vs. escalate token limit vs. accept partial.</li>
+</ul>
+
+<div class="nav">
+  <span>&larr; Reference Index</span>
+  <span><a href="../lessons/0001-core-loop.html">Lesson 0001: Core Loop &rarr;</a></span>
+</div>
+
+</body>
+</html>

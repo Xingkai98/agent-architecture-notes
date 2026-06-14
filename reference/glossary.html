@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Harness Glossary</title>
+<style>
+  :root { --bg: #fffff8; --text: #111; --muted: #666; --accent: #a00; --rule: #ddd; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 6rem; background: var(--bg); color: var(--text); line-height: 1.5; }
+  h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.35rem; margin: 2rem 0 0.5rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  dt { font-weight: 600; margin-top: 0.8rem; font-size: 0.95rem; }
+  dd { margin-left: 1.5rem; font-size: 0.92rem; margin-bottom: 0.5rem; }
+  .avoid { color: var(--accent); font-size: 0.85rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 1.5rem; }
+  a { color: var(--accent); }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
+</style>
+</head>
+<body>
+
+<h1>Agent Harness Glossary</h1>
+<p class="subtitle">Canonical terminology for the agent architecture workspace. Definitions are opinionated — they resolve ambiguities in the wider field.</p>
+
+<h2>Core Loop</h2>
+
+<dt>Agent harness</dt>
+<dd>The surrounding infrastructure that manages an LLM-based agent's execution: the loop, tool system, context management, permissions, and session lifecycle. The harness is what remains when you remove the LLM, the tools, and the UI.<br><span class="avoid">Avoid: agent framework, agent runtime (too broad).</span></dd>
+
+<dt>Core loop</dt>
+<dd>The fundamental execution cycle: receive input → call LLM → execute tools → feed results back → repeat or stop. Also called the "think-act-observe loop" or "ReAct loop."<br><span class="avoid">Avoid: agent loop (ambiguous with message pump).</span></dd>
+
+<dt>Turn</dt>
+<dd>One complete cycle of the core loop: one LLM call plus the execution of any tool calls it produced, ending when either (a) the model returns text-only, (b) stop hooks fire, or (c) an error/abort occurs. A single user request may span multiple turns.<br><span class="avoid">Avoid: step, iteration (these are ambiguous — some codebases use "step" for one LLM call regardless of tools).</span></dd>
+
+<dt>Iteration</dt>
+<dd>One LLM API call within a turn. A turn with N rounds of tool execution contains N+1 iterations (1 initial call + N follow-up calls after each tool batch).<br><span class="avoid">Avoid: step (claude-code uses "step" for what we call "turn").</span></dd>
+
+<dt>Nested two-loop architecture</dt>
+<dd>A core loop structure with an outer <code>while (true)</code> handling follow-up messages and an inner <code>while (hasToolCalls)</code> handling tool turns. Used by pi-mono and openclaw.<br><span class="avoid">Avoid: double loop (too vague).</span></dd>
+
+<dt>Flat while-true architecture</dt>
+<dd>A core loop structure with a single <code>while (true)</code> where all concerns — context prep, LLM call, tool execution, recovery — are sequential phases within one iteration. Used by claude-code and hermes-agent.<br><span class="avoid">Avoid: single loop (ambiguous).</span></dd>
+
+<h2>Tool System</h2>
+
+<dt>Batch execution</dt>
+<dd>Executing all tool calls from an LLM response after the stream completes, in parallel or sequentially. Simpler but higher latency.<br><span class="avoid">Avoid: post-stream execution.</span></dd>
+
+<dt>Streaming execution</dt>
+<dd>Executing tool calls as the LLM emits them in the stream, before the full response is complete. Lower latency but requires careful state management.<br><span class="avoid">Avoid: eager execution (not specific enough).</span></dd>
+
+<dt>Tool result termination</dt>
+<dd>A tool result flag (<code>terminate: true</code>) that signals the core loop should stop after this tool batch. Used when a tool's output is itself the final answer.<br><span class="avoid">Avoid: final tool, terminal tool.</span></dd>
+
+<h2>Context Management</h2>
+
+<dt>Compaction</dt>
+<dd>Reducing the size of conversation context to stay within the model's context window. May use summarization (LLM generates a summary), truncation (drop oldest messages), or micro-compaction (replace individual tool results with short summaries).<br><span class="avoid">Avoid: compression (implies lossless, which compaction rarely is).</span></dd>
+
+<dt>Proactive compaction</dt>
+<dd>Compacting context before an overflow occurs, typically when approaching a token threshold. Prevents wasted API calls that would fail with 413.<br><span class="avoid">Avoid: pre-emptive compaction.</span></dd>
+
+<dt>Reactive compaction</dt>
+<dd>Compacting context after receiving a 413 (context too large) error. Simpler to implement but wastes the failed API call.<br><span class="avoid">Avoid: emergency compaction.</span></dd>
+
+<h2>Lifecycle</h2>
+
+<dt>Session</dt>
+<dd>A durable, addressable conversation between a user and an agent. Has an ID, persists across agent restarts, and accumulates message history. May span many user requests.<br><span class="avoid">Avoid: conversation (too generic).</span></dd>
+
+<dt>Steering</dt>
+<dd>A user message injected mid-run to interrupt and redirect the agent. The agent finishes its current tool execution, then processes the steering message before the next LLM call.<br><span class="avoid">Avoid: interruption (steering is a specific kind of interruption with content).</span></dd>
+
+<dt>Follow-up</dt>
+<dd>A message queued during an agent run that should be processed after the agent would otherwise stop. Used for sub-agent results, notification commands, and multi-step orchestration.<br><span class="avoid">Avoid: deferred message, queued message.</span></dd>
+
+<div class="nav">
+  <a href="../lessons/0001-core-loop.html">Lesson 0001: Core Loop &rarr;</a>
+</div>
+
+</body>
+</html>
