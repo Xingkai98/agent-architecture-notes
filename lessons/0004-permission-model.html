@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0004: Permission Model — hooks, ACLs, sandboxes, and the spectrum between</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  .spectrum { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0; padding: 0.8rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.82rem; }
+  .spectrum .left { font-weight: 600; }
+  .spectrum .right { font-weight: 600; }
+  .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #adb5bd, #ffc107, #dc3545); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="#" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>Lesson 0004: Permission Model</h1>
+<p class="subtitle">From "trust the LLM completely" to "trust nothing" — how seven agent codebases decide what a tool can and cannot do.</p>
+<p class="meta">June 2026 · 7 primary source codebases · <a href="0004-permission-model.html">Permalink</a></p>
+
+<p class="sidenote">Permission models in AI agents answer two questions: <strong>can the LLM ask for this tool?</strong> and <strong>can the harness safely execute it?</strong> These are different questions, and the codebases answer them at different points in the lifecycle. The difference between a hook, an ACL, and a sandbox is <em>when</em> the check happens and <em>who</em> enforces it.</p>
+
+<p>In <a href="0002-tool-system.html">Lesson 0002</a>, we saw that tool dispatch is a central stage in every agent loop. This lesson zooms into the permission checks that gate that dispatch — how each codebase prevents the LLM from doing things it should not.</p>
+
+<h2>The permission spectrum</h2>
+
+<p>Every codebase sits somewhere on this continuum:</p>
+
+<div class="spectrum">
+  <span class="left">No permissions</span>
+  <span class="bar"></span>
+  <span class="right">Full sandboxing</span>
+</div>
+
+<ol>
+  <li><strong>No permissions:</strong> nanobot, hermes-agent — tools run unconditionally. Any gating (check_fn, SSRF detection) is an availability or safety net, not a security boundary.</li>
+  <li><strong>Hook-based delegation:</strong> pi-mono, openclaw — the framework provides a <code>beforeToolCall</code> hook; the caller implements whatever permission logic they want. The framework itself is neutral.</li>
+  <li><strong>ACL (Access Control List):</strong> claude-code, opencode — each tool has a permission level (allow, ask, deny). Rules are evaluated at registration time (what the LLM can see) and execution time (what actually runs).</li>
+  <li><strong>Full sandboxing:</strong> codex — the OS kernel enforces boundaries. Tools run inside Landlock, Windows sandbox, or macOS sandbox. The sandbox can escalate on retry.</li>
+</ol>
+
+<h2>Claude Code — Permission hooks + ACL</h2>
+
+<p>Claude Code has the most fully-realized ACL system among the seven codebases. Permission checking is a first-class lifecycle method on every tool.</p>
+
+<h3>Per-tool permission check</h3>
+
+<p>Every tool in <code>src/Tool.ts</code> has a <code>checkPermissions()</code> method. The <code>buildTool()</code> factory provides a safe default — if the tool author does not override it, the tool defaults to asking the user. This means <em>new tools are safe by default</em>.</p>
+
+<pre><code>// claude-code: src/Tool.ts — each tool carries its own permission check
+buildTool({
+  name: ToolNames.BASH,
+  // ... schema, call handler ...
+  // buildTool provides defaults for:
+  // checkPermissions(input, context) — default: ask user
+  // isConcurrencySafe, isReadOnly, isEnabled,
+  // validateInput, renderToolUseMessage, renderToolResultMessage
+})</code></pre>
+
+<h3>Permission filtering pipeline</h3>
+
+<p>The tool list that reaches the LLM is not the full set of registered tools. Three filters are applied in sequence:</p>
+
+<pre><code>// claude-code: src/tools.ts:271 — getTools() filters by context and mode
+// Returns only tools allowed in the current permission context.
+// Tools can be excluded by: permission mode, feature flags, deny rules.
+
+// claude-code: src/tools.ts:263 — filterToolsByDenyRules()
+// Applies user-configured deny rules before the LLM ever sees the tool list.
+// Deny rules can target specific tools by name.
+
+// claude-code: src/tools.ts:345 — assembleToolPool()
+// Merges built-in tools + MCP tools with deduplication.
+// MCP tools inherit the permission context of the session.</code></pre>
+
+<h3>Permission levels and persistence</h3>
+
+<p>Each tool can be set to one of three levels: <strong>allow</strong> (run without asking), <strong>ask</strong> (prompt the user each time), or <strong>deny</strong> (block outright). The <code>--dangerously-bypass-permissions</code> flag overrides all checks — an explicit escape hatch for automated environments.</p>
+
+<p>Permission decisions are persisted at three scopes: <strong>session-scoped</strong> (lasts for the current invocation), <strong>project-scoped</strong> (stored in <code>.claude/settings.json</code>), and <strong>user-scoped</strong> (stored in <code>~/.claude/settings.json</code>). This gives the user granular control over how long a permission grant lasts.</p>
+
+<h2>Codex — Multi-layered sandboxing</h2>
+
+<p>Codex is the only codebase with a serious sandboxing story. Where Claude Code asks "should this tool run?", Codex asks "can the OS enforce that this tool cannot escape?"</p>
+
+<h3>The orchestrator pipeline</h3>
+
+<p>The <code>ToolOrchestrator</code> in <code>codex-rs/core/src/tools/orchestrator.rs</code> runs every tool through a four-stage pipeline:</p>
+
+<div class="diagram">
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   APPROVAL   │ →  │   SANDBOX    │ →  │   EXECUTE    │ →  │    RETRY     │
+│              │    │  SELECTION   │    │              │    │ (escalated)  │
+│ User prompt  │    │ Landlock /   │    │ Run tool     │    │ If sandbox   │
+│ or auto-     │    │ Win / Mac    │    │ inside       │    │ blocked,     │
+│ approve      │    │ sandbox pick │    │ sandbox      │    │ retry higher │
+└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+</div>
+
+<p><strong>Approval:</strong> Before execution, the orchestrator checks whether the tool needs user approval. Network access has its own approval system with two modes: <strong>immediate</strong> (ask now) and <strong>deferred</strong> (allow the tool to run but gate network use until approved).</p>
+
+<p><strong>Sandbox selection:</strong> The orchestrator picks the appropriate sandbox for the platform: <strong>Landlock</strong> on Linux (kernel-level filesystem restrictions), <strong>Windows sandbox</strong>, or <strong>macOS sandbox</strong>. Each sandbox has a restricted and an elevated variant.</p>
+
+<p><strong>Retry with escalation:</strong> This is the unique feature. If a tool fails because the restricted sandbox blocked an operation (e.g., a file write outside the workspace), the orchestrator can <em>retry with the elevated sandbox</em> — the user does not need to re-prompt. The sandbox becomes a dynamic property rather than a static wall.</p>
+
+<h3>Parallel execution safety</h3>
+
+<p><code>codex-rs/core/src/tools/parallel.rs</code> defines <code>ToolCallRuntime</code>, which manages concurrent tool execution. Each tool's sandbox is independent, so parallel tools cannot interfere with each other — a property that hook-based and ACL-based systems cannot guarantee.</p>
+
+<h2>Opencode — ACL-based</h2>
+
+<p>Opencode uses Effect-TS to encode permission rules into the type system. Permission checking happens at two points: <strong>materialization time</strong> (before tool definitions are sent to the LLM) and <strong>execution time</strong> (when the tool actually runs).</p>
+
+<h3>Sub-agent permission derivation</h3>
+
+<pre><code>// opencode: packages/opencode/src/agent/subagent-permissions.ts
+// deriveSubagentSessionPermission():
+//   parent deny rules  +  subagent allow rules
+//   = effective subagent permission set
+//
+// Sub-agents can only use tools that:
+//   1. The parent has NOT explicitly denied, AND
+//   2. The subagent's own allow rules permit</code></pre>
+
+<h3>Tool execution wrapping</h3>
+
+<p><code>packages/core/src/tool/tool.ts</code> provides <code>withPermission()</code>, which wraps tool execution. The wrapper checks permission rules before the tool's <code>execute()</code> is called. If denied, the tool never runs — the LLM receives an error result.</p>
+
+<p><code>packages/core/src/tool/registry.ts</code> applies permission rules at <strong>materialization time</strong> — before the tool list is sent to the LLM. If a tool is denied, the LLM cannot even see it in the function list. This is a critical design choice: <em>if the LLM cannot ask for it, it cannot social-engineer the user into approving it.</em></p>
+
+<h3>Default-deny for dangerous tools</h3>
+
+<p>Two tools are default-deny in sub-agents: <code>todowrite</code> and <code>task</code>. The <code>Wildcard.match</code> utility is used for deny-rule matching on tool names, supporting glob patterns so a single rule can cover families of tools (e.g., <code>mcp__*</code> to deny all MCP tools).</p>
+
+<h2>Pi-mono, OpenClaw — Hook-based delegation</h2>
+
+<p>Neither pi-mono nor openclaw ships with a built-in permission system. Instead, the framework exposes a <code>beforeToolCall</code> hook in <code>agent-loop.ts</code>. The caller — the application that embeds the agent framework — implements permission checking by providing a hook function.</p>
+
+<pre><code>// pi-mono / openclaw: packages/agent/src/agent-loop.ts
+// The framework calls beforeToolCall(toolCall, context) before dispatch.
+// If the hook throws, the tool is skipped and the error is wrapped
+// as a ToolResultMessage with isError: true.
+//
+// The framework itself has NO opinion about what is allowed.
+// All permission logic lives in the consumer application.</code></pre>
+
+<p>When a tool throws (whether from a permission hook or from the tool itself), the agent loop catches the exception and wraps it as an error result message. The LLM sees the error and can decide how to proceed. This means the permission model degrades gracefully — a denied tool is just another error the LLM can reason about.</p>
+
+<h2>Hermes-agent, Nanobot — Minimal / Nothing</h2>
+
+<p>These two Python codebases have the thinnest permission layers. They are included on the spectrum to show what "no permission model" looks like in practice.</p>
+
+<h3>Hermes-agent: check_fn as availability gate</h3>
+
+<p>Each <code>ToolEntry</code> in hermes-agent's registry can have a <code>check_fn</code> — but this is an <strong>availability gate</strong>, not a security boundary. It answers "is this tool's dependency available?" (e.g., is Docker running?), not "is the LLM allowed to use this tool?" The <code>max_result_size_chars</code> per-tool setting is a resource limit, not a permission check.</p>
+
+<pre><code># hermes-agent: tools/registry.py:77
+class ToolEntry:
+  name: str
+  check_fn: Callable | None  # "is Docker installed?" — not "may the LLM use this?"
+  max_result_size_chars: int # resource cap, not security</code></pre>
+
+<h3>Nanobot: SSRF detection and workspace boundaries</h3>
+
+<p>Nanobot's <code>runner.py</code> has two safety checks embedded in tool execution, not in a permission layer:</p>
+
+<ul>
+  <li><strong>SSRF detection:</strong> Before a tool makes an HTTP request, nanobot checks if the target is a private IP. If so, the tool is blocked and the LLM receives an escalating hint.</li>
+  <li><strong>Workspace boundary violation:</strong> File operations outside the workspace root are detected and classified with escalating hints — from a gentle "you are outside the workspace" to a hard block.</li>
+</ul>
+
+<p>These are classified as <strong>escalating hints</strong>, not permission denials. The LLM is nudged, not stopped — a fundamentally different philosophy from ACL-based or sandbox-based approaches.</p>
+
+<h2>Comparative table</h2>
+
+<table>
+  <tr><th>Dimension</th><th>claude-code</th><th>codex</th><th>opencode</th><th>pi-mono</th><th>openclaw</th><th>hermes-agent</th><th>nanobot</th></tr>
+  <tr><td><strong>Approval model</strong></td><td>ACL (allow/ask/deny)</td><td>Sandbox + approval</td><td>ACL (Effect-TS)</td><td>Hook (consumer)</td><td>Hook (consumer)</td><td>None (check_fn)</td><td>None (SSRF hints)</td></tr>
+  <tr><td><strong>Sandboxing</strong></td><td>None</td><td>Landlock / Win / Mac + retry escalation</td><td>None</td><td>None</td><td>None</td><td>None</td><td>None</td></tr>
+  <tr><td><strong>Permission persistence</strong></td><td>Session / project / user</td><td>Per-session</td><td>Per-session (derived)</td><td>Consumer-defined</td><td>Consumer-defined</td><td>N/A</td><td>N/A</td></tr>
+  <tr><td><strong>Guardrails</strong></td><td>Deny rules, --dangerously-bypass-permissions</td><td>OS kernel enforcement</td><td>Default-deny for task/todowrite in subs</td><td>beforeToolCall hook</td><td>beforeToolCall hook</td><td>check_fn (availability)</td><td>SSRF + workspace boundary</td></tr>
+  <tr><td><strong>Check timing</strong></td><td>Registration + execution</td><td>Execution (pre-flight)</td><td>Materialization + execution</td><td>Execution (hook)</td><td>Execution (hook)</td><td>Registration (avail.)</td><td>Execution (inline)</td></tr>
+  <tr><td><strong>Fallback on deny</strong></td><td>User prompt</td><td>Escalate sandbox + retry</td><td>Error result to LLM</td><td>Error result to LLM</td><td>Error result to LLM</td><td>Tool silently excluded</td><td>Escalating hint to LLM</td></tr>
+  <tr><td><strong>Unique</strong></td><td>Three-scope persistence</td><td>Sandbox escalation on retry</td><td>Materialization-time filtering</td><td>Zero framework opinion</td><td>Hook + progress streaming</td><td>AST-based tool discovery</td><td>SSRF detection in runner</td></tr>
+</table>
+
+<h2>The fundamental tradeoff: safety vs. complexity</h2>
+
+<p>The permission model is where safety guarantees meet implementation complexity head-on:</p>
+
+<p><strong>More safety guarantees = more code, more failure modes, more user friction.</strong> Codex's sandbox escalation means a tool can retry automatically, but it requires platform-specific sandbox implementations (three different OS sandboxes, each with its own API and failure modes). Claude Code's three-scope permission persistence gives users fine-grained control, but it also means permission state can be confusing — "why is this tool asking me again? did I allow it for the session or the project?"</p>
+
+<p><strong>Less safety infrastructure = simpler code, but the user (or the embedding application) shoulders all the risk.</strong> Pi-mono's hook-based approach has zero permission code in the framework. That is elegant — until an LLM runs <code>rm -rf /</code> because nobody wired up the hook.</p>
+
+<div class="callout">
+  <strong>Design heuristic:</strong> Permission at <em>registration/materialization time</em> keeps the LLM from asking for things it cannot do. Permission at <em>execution time</em> keeps the harness safe from the LLM doing things it should not. The strongest systems (claude-code, opencode, codex) do both. The weakest (hermes-agent, nanobot) do neither — they gate on availability or nudge with hints, trusting the LLM to behave. Choose your point on the spectrum based on your threat model: if the LLM has access to a shell, execution-time enforcement is not optional.
+</div>
+
+<h2>Exercise: Identify the permission model</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>Quiz</h3>
+
+  <div class="question">Q1. Which codebase is the ONLY one that uses OS-level sandboxing (Landlock, Windows sandbox, macOS sandbox) with retry-on-escalation?</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">claude-code</div>
+    <div class="option" data-q="1" data-a="b">codex</div>
+    <div class="option" data-q="1" data-a="c">opencode</div>
+    <div class="option" data-q="1" data-a="d">pi-mono</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. In opencode, when are permission rules first applied to filter which tools the LLM can see?</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">At execution time, inside withPermission()</div>
+    <div class="option" data-q="2" data-a="b">At materialization time, before sending tool definitions to the LLM</div>
+    <div class="option" data-q="2" data-a="c">At tool registration, when the tool is first loaded</div>
+    <div class="option" data-q="2" data-a="d">At session creation, when the agent is initialized</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. What is hermes-agent's check_fn primarily used for?</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">Checking if the LLM is allowed to use the tool</div>
+    <div class="option" data-q="3" data-a="b">Checking if the tool's dependencies are available (e.g., Docker running)</div>
+    <div class="option" data-q="3" data-a="c">Enforcing sandbox boundaries</div>
+    <div class="option" data-q="3" data-a="d">Validating tool input schemas</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'b', 2: 'b', 3: 'b' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ Correct.';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ Not quite — re-read the relevant section above.';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>What we haven't covered</h2>
+<ul>
+  <li><strong>MCP tool permission inheritance</strong> — how external tools from MCP servers inherit the session's permission context (<a href="0004-permission-model.html">covered here</a> for claude-code's assembleToolPool)</li>
+  <li><strong>Permission UI / user prompting</strong> — the TUI/CLI prompts that ask users "allow this tool?" — covered in <a href="0007-ui-transport.html">Lesson 0007</a></li>
+  <li><strong>Tool execution sandboxing internals</strong> — the Landlock rule construction and platform-specific sandbox APIs — covered in <a href="0002-tool-system.html">Lesson 0002</a></li>
+</ul>
+
+<h2>Primary sources</h2>
+<ol>
+  <li><strong>claude-code</strong>: <code>src/Tool.ts</code> (checkPermissions, buildTool defaults), <code>src/tools.ts:271</code> (getTools), <code>:263</code> (filterToolsByDenyRules), <code>:345</code> (assembleToolPool)</li>
+  <li><strong>codex</strong>: <code>codex-rs/core/src/tools/orchestrator.rs</code> (ToolOrchestrator pipeline), <code>codex-rs/core/src/tools/parallel.rs</code> (ToolCallRuntime)</li>
+  <li><strong>opencode</strong>: <code>packages/opencode/src/agent/subagent-permissions.ts</code> (deriveSubagentSessionPermission), <code>packages/core/src/tool/tool.ts</code> (withPermission), <code>packages/core/src/tool/registry.ts</code> (materialization-time filtering)</li>
+  <li><strong>pi-mono</strong>: <code>packages/agent/src/agent-loop.ts</code> (beforeToolCall hook)</li>
+  <li><strong>openclaw</strong>: <code>packages/agent-core/src/agent-loop.ts</code> (beforeToolCall hook, identical pattern)</li>
+  <li><strong>hermes-agent</strong>: <code>tools/registry.py:77</code> (ToolEntry.check_fn, max_result_size_chars)</li>
+  <li><strong>nanobot</strong>: <code>nanobot/agent/tools/runner.py</code> (SSRF detection, workspace boundary violation)</li>
+</ol>
+
+<h2>Recommended next reading</h2>
+<ul>
+  <li>If you want the <strong>most sophisticated</strong> permission system: trace <code>codex/codex-rs/core/src/tools/orchestrator.rs</code> — the approval → sandbox → execute → retry pipeline is the most complete safety architecture in any open-source agent.</li>
+  <li>If you want the <strong>most practical</strong> ACL pattern: read <code>claude-code/src/tools.ts</code> — the three-filter pipeline (context → deny rules → merge) is clean and directly applicable to new agent frameworks.</li>
+  <li>If you want the <strong>most elegant</strong> type-level approach: study <code>opencode/packages/core/src/tool/registry.ts</code> — materialization-time filtering means the type system prevents the LLM from ever seeing denied tools.</li>
+</ul>
+
+<div class="callout">
+  <strong>Ask followup questions.</strong> If anything in this lesson is unclear, or you want to go deeper on a specific codebase's permission model, ask your agent teacher. The codebases are all cloned and indexed at <code>/home/shared/agent-study/repos/</code>.
+</div>
+
+<div class="nav">
+  <span><a href="0003-context-management.html">&larr; Lesson 0003: Context Management</a></span>
+  <span><a href="0005-agent-loop-in-depth.html">Lesson 0005: Agent Loop In Depth &rarr;</a></span>
+</div>
+
+<script src="../assets/lang-switcher.js"></script>
+</body>
+</html>

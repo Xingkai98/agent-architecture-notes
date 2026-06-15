@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第8课：错误恢复 — 跨 AI agent 代码库的韧性模式</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  .spectrum { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0; padding: 0.8rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.82rem; }
+  .spectrum .left { font-weight: 600; }
+  .spectrum .right { font-weight: 600; }
+  .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="../../lessons/0008-error-recovery.html" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>第8课：错误恢复与韧性</h1>
+<p class="subtitle">从崩溃到继续——7 个 agent 代码库如何分类、恢复并经受住失败。</p>
+<p class="meta">2026年6月 · 7 个主要源代码库 · <a href="0008-error-recovery.html">固定链接</a></p>
+
+<p class="sidenote">每个 agent 循环都会遇到错误。脆弱的 agent 与韧性的 agent 之间的区别<strong>不在于</strong>错误是否发生——而在于 agent 是否能够看到错误、分类错误、选择恢复策略，并在不丢失状态的情况下继续。本课追溯了全部 7 个代码库中的完整恢复流水线。</p>
+
+<p>在<a href="0002-tool-system.html">第2课</a>中，我们看到工具是 agent 循环的引擎。在<a href="0003-context-management.html">第3课</a>中，我们看到上下文是循环的记忆。本课涵盖当循环<em>断裂</em>时发生什么——以及每个代码库如何将其重新拾起。</p>
+
+<h2>错误类别</h2>
+
+<p>每个 agent 错误都可以归入五个类别之一。每个代码库以不同方式处理它们，但这些类别是通用的：</p>
+
+<div class="diagram">
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│   API 错误      │  │  上下文溢出     │  │   格式错误      │  │   工具失败      │  │    中止         │
+│                 │  │                 │  │   响应         │  │                 │  │                 │
+│ 401, 429, 5xx,  │  │ Prompt 太长，   │  │  JSON 解析     │  │  超时，         │  │  用户取消，     │
+│ 超时，          │  │ token 预算      │  │  失败，         │  │  非零退出码，   │  │  hook 否决，    │
+│ 连接错误        │  │ 超出           │  │  流中断         │  │  沙箱拒绝       │  │  超过最大轮次   │
+└─────────────────┘  └─────────────────┘  └─────────────────┘  └─────────────────┘  └─────────────────┘
+</div>
+
+<h2>恢复理念的两个极端</h2>
+
+<p>在七个代码库中，出现了两个极端：</p>
+
+<div class="spectrum">
+  <span class="left">调用者委派（pi-mono、openclaw）</span>
+  <span class="bar"></span>
+  <span class="right">完全自我恢复（claude-code、hermes-agent）</span>
+</div>
+
+<ol>
+  <li><strong>调用者委派：</strong> pi-mono、openclaw。agent 循环在错误时停止并向上发出原因信号。恢复——重试、重启、模型切换——是调用者的责任。框架提供钩子（<code>config.transformContext</code>、<code>config.prepareNextTurn</code>），但没有内置的重试逻辑。</li>
+  <li><strong>完全自我恢复：</strong> claude-code、hermes-agent、nanobot。agent 循环包含带有 exponential backoff 的重试、模型回退链、溢出时的上下文压缩以及 checkpoint restore。循环本身就是一个带有错误转换的状态机。</li>
+  <li><strong>混合模式：</strong> codex、opencode。一些错误在内部处理（SQLite 恢复、步骤限制），其他错误则上报给调用者。</li>
+</ol>
+
+<h2>Claude Code：最复杂的恢复系统</h2>
+
+<p>Claude Code 在 <code>src/query.ts:241</code> 中的 <code>queryLoop()</code> 是一个递归生成器，针对可变 <code>State</code> 逐轮运行 agent 循环。该循环具有<strong>12 个终止原因</strong>（结束循环的条件）和<strong>7 个恢复转换</strong>（使用修改后的状态重试当前轮次的条件）。</p>
+
+<h3>12 个终止原因</h3>
+
+<p>循环的每次退出都用行号记录。这些不是异常——它们是带有 <code>reason</code> 鉴别器的显式 <code>return</code> 语句：</p>
+
+<table>
+  <tr><th>原因</th><th>行号</th><th>触发条件</th></tr>
+  <tr><td><code>blocking_limit</code></td><td>646</td><td>drain-and-retry 次数超过限制，未成功重试</td></tr>
+  <tr><td><code>image_error</code></td><td>977</td><td>无法将上传的图片转换为 base64</td></tr>
+  <tr><td><code>model_error</code></td><td>996</td><td>API 返回了无法重试或回退的错误</td></tr>
+  <tr><td><code>aborted_streaming</code></td><td>1051</td><td>流在响应中被中止（用户中断或网络断开）</td></tr>
+  <tr><td><code>prompt_too_long</code></td><td>1175</td><td>上下文压缩用尽所有策略，prompt 仍然超过限制</td></tr>
+  <tr><td><code>completed</code></td><td>1264</td><td>LLM 返回了完整的文本响应且无工具调用</td></tr>
+  <tr><td><code>completed</code></td><td>1357</td><td>所有工具调用完成，assistant 消息被完全处理</td></tr>
+  <tr><td><code>stop_hook_prevented</code></td><td>1279</td><td>Stop hook 返回 <code>{allowed: false}</code>，阻止循环退出</td></tr>
+  <tr><td><code>aborted_tools</code></td><td>1515</td><td>用户在工具执行期间中止</td></tr>
+  <tr><td><code>hook_stopped</code></td><td>1520</td><td>一个 hook 请求循环停止</td></tr>
+  <tr><td><code>max_turns</code></td><td>1711</td><td>轮次计数超过 <code>MAX_TURNS</code> 限制</td></tr>
+</table>
+
+<h3>7 个恢复转换</h3>
+
+<p>在达到终止原因之前，循环可能走上 7 条恢复路径中的一条。每条路径修改 <code>State</code> 并 yield 回循环顶部进行另一次尝试：</p>
+
+<pre><code>// claude-code: src/query.ts — queryLoop() 中的恢复转换
+
+// 1. collapse_drain_retry — drain-and-collapse 后重试同一轮
+// 2. reactive_compact_retry — 溢出触发的 compaction，然后重试
+// 3. max_output_tokens_escalate — 首次 'max_tokens' 命中 → 升级预算
+// 4. max_output_tokens_recovery — 后续命中 → 注入恢复消息
+// 5. stop_hook_blocking — stop hook 说"不要停止"，继续循环
+// 6. token_budget_continuation — 精确预算命中，追加继续请求
+// 7. next_turn — 正常转换：收集结果，开始下一轮</code></pre>
+
+<h3>Max-tokens 恢复：两阶段策略</h3>
+
+<p>当模型达到其输出 token 限制时，Claude Code 使用两阶段升级：</p>
+
+<pre><code>// Phase 1: 将预算从 8K 升级到 64K（ESCALATED_MAX_TOKENS）
+// 如果在 64K 时再次命中，Phase 2 启动：
+//
+// Phase 2: 将恢复消息注入到对话中
+// "你达到了输出 token 限制。总结你的进展并继续。"
+//
+// 此过程最多重复 3 次。第三次恢复消息后，
+// 如果仍然命中限制，循环终止。
+</code></pre>
+
+<h3>模型回退</h3>
+
+<p>API 错误在 <code>src/services/api/withRetry.js</code> 中被捕获。当主模型因可重试错误而失败时，会抛出 <code>FallbackTriggeredError</code>。调用者捕获此异常并切换到 <code>fallbackModel</code>——通常是一个更小、更快的模型，至少能在要求用户干预之前完成当前轮次。</p>
+
+<div class="callout">
+  <strong>设计观察：</strong> Claude Code 将所有代码库中最多的恢复逻辑打包到了一个函数中。结果是一个循环，其中每个退出和重试路径都在一个地方可见——没有分散在文件中的隐藏恢复逻辑。这是有意为之："压平循环，在一个函数中看到所有终止条件。"
+</div>
+
+<h2>Hermes-agent：分类优先的恢复，22 个失败原因</h2>
+
+<p>Hermes-agent 采取了根本不同的方法：不是带有内联恢复的平坦循环，而是使用专用的<strong>错误分类流水线</strong>，在任何恢复决策做出之前运行。</p>
+
+<h3>FailoverReason：22 个原因</h3>
+
+<p><code>agent/error_classifier.py:24</code> 定义了具有 22 个成员的 <code>FailoverReason</code> 枚举：</p>
+
+<pre><code># hermes-agent: agent/error_classifier.py:24
+class FailoverReason(enum.Enum):
+    AUTH = "auth"
+    BILLING = "billing"
+    RATE_LIMIT = "rate_limit"
+    OVERLOADED = "overloaded"           # 529, 503 with retry-after
+    SERVER_ERROR = "server_error"       # 5xx, not overloaded
+    TIMEOUT = "timeout"
+    CONTEXT_OVERFLOW = "context_overflow"
+    PAYLOAD_TOO_LARGE = "payload_too_large"
+    IMAGE_TOO_LARGE = "image_too_large"
+    MODEL_NOT_FOUND = "model_not_found"
+    TOKEN_LIMIT = "token_limit"
+    BAD_REQUEST = "bad_request"
+    CONTENT_FILTER = "content_filter"
+    TLS = "tls"
+    DNS = "dns"
+    CONNECTION = "connection"
+    # ... 还有 6 个更罕见的原因</code></pre>
+
+<p><code>classify_api_error()</code> 中的分类流水线按优先级顺序运行：<strong>提供商特定模式</strong>（检查提供商的错误封装）→ <strong>HTTP 状态码</strong> → <strong>错误码字符串</strong> → <strong>消息匹配</strong> → <strong>TLS 瞬态检测</strong> → <strong>传输启发式</strong>。每个阶段都可以通过确定的分类来短路流水线。</p>
+
+<h3>TurnRetryState：14 个一次性恢复守卫</h3>
+
+<p><code>agent/turn_retry_state.py:33</code> 定义了 <code>TurnRetryState</code> dataclass——一个包含 14 个布尔标志的集合，每个标志作为一次性守卫，防止无限重试循环：</p>
+
+<ul>
+  <li><strong>5 个认证刷新守卫：</strong> <code>refreshed_oauth</code>、<code>refreshed_api_key</code>、<code>rotated_org</code>、<code>switched_project</code>、<code>cleared_token_cache</code></li>
+  <li><strong>6 个格式/负载守卫：</strong> <code>truncated_context</code>、<code>dropped_images</code>、<code>compressed_payload</code>、<code>switched_to_text_only</code>、<code>split_long_message</code>、<code>reduced_tool_count</code></li>
+  <li><strong>2 个传输/速率限制守卫：</strong> <code>switched_endpoint</code>、<code>rate_limit_backoff_applied</code></li>
+  <li><strong>2 个重启信号：</strong> <code>needs_fresh_turn</code>、<code>needs_model_fallback</code></li>
+</ul>
+
+<p>每个守卫在首次采取其恢复操作时设置为 <code>True</code>。如果同样的错误再次出现，分类器看到守卫已经设置，会升级为更严重的失败（通常是模型回退或终止错误）。</p>
+
+<h3>带随机抖动的指数退避</h3>
+
+<p><code>agent/retry_utils.py:19</code> 实现了带抖动的指数退避：</p>
+
+<pre><code># hermes-agent: agent/retry_utils.py:19
+base_delay = 5         # 秒
+max_delay = 120        # 2 分钟上限
+jitter_ratio = 0.5     # ±50% 随机化
+
+# 公式：min(base * 2^attempt * (1 ± jitter), max_delay)
+</code></pre>
+
+<h3>回退链</h3>
+
+<p>Hermes-agent 在 agent 实例上维护一个有序回退链：<code>agent._fallback_chain</code>——一个 <code>(provider, model)</code> 对的列表。当分类器返回硬失败原因（model_not_found、billing、content_filter），或软失败的所有一次性守卫都已用尽时，agent 激活链中的下一个条目并将 <code>retry_count</code> 重置为 0。这意味着完整的恢复预算会在每次回退步骤中重置——新模型获得新的机会。</p>
+
+<h2>Codex：SQLite 损坏恢复</h2>
+
+<p>Codex 因其架构独有的恢复机制而与众不同：agent 的运行时状态存储在 SQLite 数据库中，而 SQLite 损坏是长期运行 agent 会话中的一种真实失败模式。</p>
+
+<h3>备份并重新开始</h3>
+
+<p><code>codex-rs/state/src/runtime/recovery.rs:71</code> 实现了一个干净的恢复策略：</p>
+
+<pre><code>// codex-rs: codex-rs/state/src/runtime/recovery.rs:71
+fn backup_runtime_db_for_fresh_start(corrupt_path: &Path) -> Result<PathBuf> {
+    // 1. 创建备份目录：db-backups/sqlite-{timestamp}-{seq}/
+    // 2. 将损坏的 DB 文件移入备份目录
+    // 3. 返回备份路径（以便调用者可以检查它）
+    // 4. 调用者在原始路径创建新的 DB
+    // 5. 之前的状态丢失，但损坏的 DB 被保留用于取证
+}
+</code></pre>
+
+<p>检测函数 <code>is_sqlite_corruption_error()</code> 遍历错误链（Rust 的 <code>Error::source()</code>），查找 SQLite 错误码 <strong>11</strong>（SQLITE_CORRUPT——数据库磁盘映像损坏）和 <strong>26</strong>（SQLITE_NOTADB——文件不是数据库）。这是一次性恢复，不重试——如果新的 DB 也损坏，agent 硬失败。</p>
+
+<h2>Nanobot：提供商重试、长度恢复与 checkpoint restore</h2>
+
+<p>Nanobot 在三个不同的层次实现恢复：</p>
+
+<h3>提供商重试</h3>
+
+<p><code>nanobot/providers/base.py:817</code> —— <code>_run_with_retry()</code> 具有两种模式：</p>
+
+<ul>
+  <li><strong>标准模式：</strong> 3 次尝试，延迟分别为 1 秒、2 秒、4 秒。用于正常的 API 调用。</li>
+  <li><strong>持久模式：</strong> 无限重试，60 秒延迟上限。用于长期运行的 agent 会话，用户期望 agent 不断尝试直到提供商恢复。</li>
+</ul>
+
+<h3>长度恢复</h3>
+
+<p><code>nanobot/agent/runner.py:528</code> —— 当 LLM 响应具有 <code>finish_reason == "length"</code>（模型在响应中达到了其输出 token 限制）：</p>
+
+<pre><code># nanobot/agent/runner.py:528
+# 1. build_length_recovery_message() 构造：
+#    "你之前的回复因长度限制而被截断。
+#     请从你中断的地方继续。"
+# 2. 该消息作为用户轮次注入
+# 3. 最多 3 次尝试——然后循环终止
+</code></pre>
+
+<h3>空响应重试</h3>
+
+<p>空的 LLM 响应（无内容且无工具调用）最多重试 2 次。重试消息明确要求模型产生输出。</p>
+
+<h3>流中断恢复</h3>
+
+<p>如果流式连接中断，<code>on_stream_recover</code> 回调从最后收到的 token 开始一个新的流段。模型从中断处继续生成，而不是丢弃整个轮次。</p>
+
+<h3>Checkpoint restore</h3>
+
+<p><code>nanobot/agent/loop.py:1725</code> —— 在崩溃或重启后，加载运行中的轮次 checkpoint。任何在崩溃时正在进行的工具调用会获得<strong>合成的错误结果</strong>：</p>
+
+<pre><code># nanobot/agent/loop.py:1725
+# 恢复的工具调用 → 合成错误：
+# {"error": "工具调用因 agent 重启而中断。结果不可用。"}
+# LLM 将其视为错误工具结果，并可以决定重试还是继续。
+</code></pre>
+
+<h2>Opencode：Effect-TS 类型化错误与步骤限制</h2>
+
+<p>Opencode 使用 Effect-TS 在类型系统中编码错误：</p>
+
+<pre><code>// opencode: packages/core/src/session/runner/index.ts:20
+type RunError =
+  | LLMError               // 提供商级失败
+  | Model.Error            // 模型特定错误
+  | MessageDecodeError     // 无法解析 LLM 输出
+  | ContextSnapshotDecodeError  // 损坏的上下文快照
+  | StepLimitExceededError // 超过 MAX_STEPS
+</code></pre>
+
+<h3>步骤限制</h3>
+
+<p><code>MAX_STEPS = 25</code>。当轮次计数达到 25 时，引发 <code>StepLimitExceededError</code>。这是一个硬终止——不重试，不升级。调用者必须决定如何处理。</p>
+
+<h3>上下文溢出恢复</h3>
+
+<p><code>compactAfterOverflow()</code> 执行单次压缩并重试。如果一次压缩后上下文仍然溢出，错误向上传播。没有像 Claude Code 的 drain-and-collapse 流水线那样的多阶段升级。</p>
+
+<h3>错误时的工具清理</h3>
+
+<p><code>failUnsettledTools()</code> 在轮次中发生提供商错误时被调用。任何已排队但尚未完成的工具调用被标记为失败并附上错误消息，确保对话状态保持一致——模型看到它的工具调用没有被执行。</p>
+
+<h2>Pi-mono、OpenClaw：最小化错误处理</h2>
+
+<p>这两个 TypeScript 代码库采取了尽可能简单的方法：</p>
+
+<ul>
+  <li><strong>无内置重试。</strong> 当 <code>stopReason === "error"</code> 或 <code>"aborted"</code> 时循环停止。</li>
+  <li><strong>工具执行错误</strong> 在 <code>executeToolCalls()</code> 中被捕获并作为错误工具结果返回——LLM 看到带有 <code>isError: true</code> 的 <code>ToolResultMessage</code>。</li>
+  <li><strong>恢复被委派给调用者</strong>，通过两个配置钩子：
+    <ul>
+      <li><code>config.transformContext</code> —— 允许调用者在每轮之前修改上下文（例如压缩、截断）</li>
+      <li><code>config.prepareNextTurn</code> —— 在每轮之前调用，调用者可以注入恢复消息或切换模型</li>
+    </ul>
+  </li>
+</ul>
+
+<p>理念：框架不应该做出恢复决策。调用者了解自己的用例和容错能力。给他们钩子，而不是策略。</p>
+
+<h2>对比表格</h2>
+
+<table>
+  <tr><th>维度</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th></tr>
+  <tr><td><strong>API 重试</strong></td><td>无</td><td>无</td><td>指数退避 + 回退模型</td><td>带抖动指数退避（5-120s）</td><td>3 次尝试或无限制</td><td>无（委派）</td><td>Effect 重试</td></tr>
+  <tr><td><strong>上下文溢出</strong></td><td>transformContext 钩子</td><td>transformContext 钩子</td><td>Drain + collapse + retry（多阶段）</td><td>截断 + 图片丢弃（6 个守卫）</td><td>无显式</td><td>无</td><td>单次压缩 + 重试</td></tr>
+  <tr><td><strong>模型回退</strong></td><td>无（调用者）</td><td>无（调用者）</td><td>FallbackTriggeredError → fallbackModel</td><td>有序回退链（重置计数）</td><td>无显式</td><td>无</td><td>无</td></tr>
+  <tr><td><strong>工具错误恢复</strong></td><td>错误作为结果</td><td>错误作为结果</td><td>错误作为结果 + 截断</td><td>错误作为结果</td><td>错误作为结果 + checkpoint restore</td><td>沙箱升级重试</td><td>failUnsettledTools()</td></tr>
+  <tr><td><strong>错误分类</strong></td><td>无</td><td>无</td><td>12 个终止原因（内联）</td><td>22 个 FailoverReason（流水线）</td><td>finish_reason 检查</td><td>SQLite 错误码</td><td>5 类型联合</td></tr>
+  <tr><td><strong>Max-tokens 恢复</strong></td><td>无</td><td>无</td><td>两阶段：升级 + 注入（3x）</td><td>无显式</td><td>长度恢复消息（3x）</td><td>无</td><td>无</td></tr>
+  <tr><td><strong>状态保留</strong></td><td>无</td><td>无</td><td>可变 State 对象</td><td>TurnRetryState（14 个标志）</td><td>Checkpoint 到磁盘</td><td>备份损坏 DB</td><td>上下文快照</td></tr>
+  <tr><td><strong>独特之处</strong></td><td>调用者拥有的钩子</td><td>进度感知中止</td><td>平坦循环：所有退出在一个函数中可见</td><td>一次性守卫矩阵</td><td>流中断恢复</td><td>SQLite 取证备份</td><td>Effect-TS 类型化联合</td></tr>
+</table>
+
+<h2>设计启发</h2>
+
+<p>研究全部 7 个代码库后，浮现出四个原则：</p>
+
+<div class="callout">
+  <strong>1. 恢复路径应该是可见的。</strong> 压平循环，在一个函数中看到所有终止条件。Claude Code 的 <code>queryLoop()</code> 是典范——12 个终止原因和 7 个恢复转换，全在一个文件中，全带有行号。当恢复逻辑分散在多个文件中（重试在一个文件，压缩在另一个，回退在第三个），就不可能推理完整的状态机。
+</div>
+
+<div class="callout">
+  <strong>2. 一次性守卫防止无限恢复循环。</strong> 每个恢复路径需要一个标志，防止它对同一个错误激活两次。Hermes-agent 的 14 个 <code>TurnRetryState</code> 布尔标志是对这一原则最清晰的实现。Claude Code 的 max-tokens 恢复（升级一次，然后注入最多 3 次）是另一个例子。没有这些守卫，一个持久错误会永远循环。
+</div>
+
+<div class="callout">
+  <strong>3. 工具错误应该对 LLM 可读。</strong> 将工具失败格式化为模型可以推理的消息。每个代码库都这样做，但 nanobot 的 checkpoint restore 走得最远：孤立的工具调用获得解释<em>为什么</em>结果不可用的合成错误消息。模型然后可以决定是重试工具调用还是绕过缺失的数据。
+</div>
+
+<div class="callout">
+  <strong>4. 恢复越复杂，循环就应该越平坦。</strong> Claude Code 拥有最多的恢复路径（7 个）和最平坦的循环（全在 <code>queryLoop()</code> 中）。这不是巧合。当恢复逻辑深度嵌套或分散在模块间时，添加新的恢复路径有可能破坏现有的路径。一个平坦、可见的循环使每个转换都明确，每个交互都可观察。
+</div>
+
+<h2>练习：哪种恢复策略？</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>测验</h3>
+
+  <div class="question">Q1. 哪个代码库将所有 12 个终止原因和 7 个恢复转换打包到一个递归生成器函数中？</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">hermes-agent</div>
+    <div class="option" data-q="1" data-a="b">codex</div>
+    <div class="option" data-q="1" data-a="c">claude-code</div>
+    <div class="option" data-q="1" data-a="d">nanobot</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. hermes-agent 的 TurnRetryState 维护多少个一次性恢复守卫？</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">7</div>
+    <div class="option" data-q="2" data-a="b">12</div>
+    <div class="option" data-q="2" data-a="c">14</div>
+    <div class="option" data-q="2" data-a="d">22</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. Codex 在其损坏检测中检查哪两个 SQLite 错误码？</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">1 和 5</div>
+    <div class="option" data-q="3" data-a="b">11 和 26</div>
+    <div class="option" data-q="3" data-a="c">13 和 19</div>
+    <div class="option" data-q="3" data-a="d">7 和 21</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+
+  <div class="question">Q4. pi-mono/openclaw 与所有其他代码库在错误处理上的关键设计区别是什么？</div>
+  <div class="options">
+    <div class="option" data-q="4" data-a="a">它们使用 JSON 错误消息而不是类型化错误</div>
+    <div class="option" data-q="4" data-a="b">它们没有内置重试——恢复通过钩子委派给调用者</div>
+    <div class="option" data-q="4" data-a="c">它们对所有错误精确重试 3 次</div>
+    <div class="option" data-q="4" data-a="d">它们使用 SQLite 进行错误日志记录</div>
+  </div>
+  <div class="feedback" id="feedback4"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'c', 2: 'c', 3: 'b', 4: 'b' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ 正确。';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ 不对——请重新阅读上面相关部分。';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>我们没有涵盖的内容</h2>
+<ul>
+  <li><strong>Webhook 级别的重试和投递保证</strong> —— 外部集成如何从 agent 不可用中恢复（<a href="0005-session-management.html">涵盖在第5课</a>）</li>
+  <li><strong>每个提供商的 LLM 错误码分类</strong> —— OpenAI vs Anthropic vs Google 错误码映射 —— 对架构课程来说过于细节；直接探索 hermes-agent 的 <code>error_classifier.py</code> 以了解每个提供商的模式</li>
+  <li><strong>重试预算和成本影响</strong> —— 每次重试都需要 token 成本；恢复的经济学在<a href="0006-cost-tracking.html">第6课</a>中涵盖</li>
+</ul>
+
+<h2>主要来源</h2>
+<ol>
+  <li><strong>claude-code</strong>：<code>src/query.ts:241</code>（queryLoop）、<code>:646</code>（blocking_limit）、<code>:977</code>（image_error）、<code>:996</code>（model_error）、<code>:1051</code>（aborted_streaming）、<code>:1175</code>（prompt_too_long）、<code>:1264,1357</code>（completed）、<code>:1279</code>（stop_hook_prevented）、<code>:1515</code>（aborted_tools）、<code>:1520</code>（hook_stopped）、<code>:1711</code>（max_turns）；<code>src/services/api/withRetry.js</code>（模型回退）</li>
+  <li><strong>hermes-agent</strong>：<code>agent/error_classifier.py:24</code>（FailoverReason）、<code>agent/turn_retry_state.py:33</code>（TurnRetryState）、<code>agent/retry_utils.py:19</code>（指数退避）</li>
+  <li><strong>codex</strong>：<code>codex-rs/state/src/runtime/recovery.rs:71</code>（backup_runtime_db_for_fresh_start）、<code>is_sqlite_corruption_error()</code>（错误码 11、26）</li>
+  <li><strong>nanobot</strong>：<code>nanobot/providers/base.py:817</code>（_run_with_retry）、<code>nanobot/agent/runner.py:528</code>（长度恢复）、<code>nanobot/agent/loop.py:1725</code>（checkpoint restore）</li>
+  <li><strong>opencode</strong>：<code>packages/core/src/session/runner/index.ts:20</code>（RunError）、<code>compactAfterOverflow()</code>、<code>failUnsettledTools()</code></li>
+  <li><strong>pi-mono / openclaw</strong>：<code>config.transformContext</code>、<code>config.prepareNextTurn</code>（委派的恢复钩子）</li>
+</ol>
+
+<h2>推荐下一步阅读</h2>
+<ul>
+  <li>如果你想要<strong>最精密的</strong>恢复系统：追踪 <code>claude-code/src/query.ts</code> —— 从 <code>queryLoop()</code>（第 241 行）开始，跟踪每个终止原因和恢复转换。整个状态机在一个文件中。</li>
+  <li>如果你想要<strong>最系统的</strong>分类：阅读 <code>hermes-agent/agent/error_classifier.py</code> —— 从提供商模式到传输启发式的优先级有序流水线是错误分诊的大师课程。</li>
+  <li>如果你想要<strong>最实用</strong>的采纳模式：研究 <code>hermes-agent/agent/turn_retry_state.py</code> —— 一次性守卫模式是简单的、可测试的，并防止了 agent 恢复中最常见的一类错误（无限重试循环）。</li>
+</ul>
+
+<div class="callout">
+  <strong>提出后续问题。</strong> 如果本课中有什么不清楚的地方，或者你想深入了解某个特定代码库的恢复策略，请问你的 agent 老师。所有代码库已克隆并建立索引，位于 <code>/home/shared/agent-study/repos/</code>。
+</div>
+
+<div class="nav">
+  <span><a href="0007-ui-transport.html">&larr; 第7课：UI 与传输层</a></span>
+  <span><a href="0009-security-patterns.html">第9课：安全模式 &rarr;</a></span>
+</div>
+
+<script src="../../assets/lang-switcher.js"></script>
+</body>
+</html>

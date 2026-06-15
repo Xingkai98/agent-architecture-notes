@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第3课：上下文管理</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  .spectrum { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0; padding: 0.8rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.82rem; }
+  .spectrum .left { font-weight: 600; }
+  .spectrum .right { font-weight: 600; }
+  .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="../../lessons/0003-context-management.html" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>第3课：上下文管理</h1>
+<p class="subtitle">AI agent 如何管理其上下文窗口 — compact、token 预算以及树模型。</p>
+<p class="meta">2026年6月 · 7个主要源代码库 · <a href="0003-context-management.html">永久链接</a></p>
+
+<p class="sidenote">上下文窗口是每个 agent 的<strong>最严苛资源约束</strong>。上下文太少则 agent 忘记它在做什么；太多则 LLM 变慢、变贵、变混乱。每个代码库都不同地解决这个问题，但它们面对同一个难题：如何保留重要的、丢弃次要的。</p>
+
+<p>在<a href="0002-tool-system.html">第2课</a>中，我们涵盖了从工具定义到规范化的全过程。本课深入<em>相反</em>的方向：agent 如何将工具结果和对话历史压缩回上下文窗口的容量之内。</p>
+
+<h2>四种基本策略</h2>
+
+<p>纵观七个代码库，浮现出四种截然不同的 compact 策略：</p>
+
+<div class="spectrum">
+  <span class="left">主动式（调用之前）</span>
+  <span class="bar"></span>
+  <span class="right">被动式（错误之后）</span>
+</div>
+
+<ol>
+  <li><strong>主动 compact（claude-code、hermes-agent）：</strong> 在<em>每次</em> API 调用之前检查 token 数量。如果超过阈值，先 compact。这是最安全的方式 — LLM 永远不会看到超载的上下文。</li>
+  <li><strong>被动 compact（pi-mono、openclaw、hermes-agent）：</strong> 等待提供商返回 413 prompt-too-long 错误，然后 compact 并重试。实现更简单，但浪费一次 API 调用。</li>
+  <li><strong>每轮合并（nanobot）：</strong> 每轮运行一次轻量级合并检查；如果需要，在继续之前运行最多 5 轮摘要。</li>
+  <li><strong>委托给提供商（opencode、codex）：</strong> 将 compact 留给外部包（<code>@opencode-ai/core</code>）或可配置的 shell 钩子。没有内置的 LLM 摘要器。</li>
+</ol>
+
+<h2>最复杂的方案：claude-code 的七层架构</h2>
+
+<p>Claude Code 拥有七个代码库中最精密的上下文管理。七个不同层次协同工作：</p>
+
+<h3>第一层：Token 预算（守门人）</h3>
+
+<p>每次 API 调用前，<code>src/query/tokenBudget.ts</code> 检查对话是否在容量之内。阈值是上下文窗口的 90%（<code>COMPLETION_THRESHOLD = 0.9</code>）。它还检测<strong>收益递减</strong>：如果连续 3 次或更多续接各自增加的新 token 不足 500，系统将强制 compact — 对话正在原地打转而没有进展。</p>
+
+<p>收益递减启发式虽微妙但重要。没有它，一个不断对同一文件做微小编辑的 agent 仅凭 token 计数永远不会触发 compact — 每轮增加很少。但经过 10+ 轮后，上下文中充满了近乎重复的工具结果。该启发式捕获了这一模式："你没有在添加有意义的新信息，所以现在就 compact。"</p>
+
+<pre><code>// src/query/tokenBudget.ts — 阈值和收益递减检查
+const COMPLETION_THRESHOLD = 0.9;
+
+function isDiminishingReturns(continuations: Continuation[]): boolean {
+  return continuations.length >= 3 &&
+    continuations.slice(-3).every(c => c.tokenDelta < 500);
+}</code></pre>
+
+<h3>第二层：上下文窗口解析</h3>
+
+<p><code>src/utils/context.ts</code> — <code>getContextWindowForModel()</code> 解析当前模型的上下文窗口。它检查 <code>[1m]</code> 后缀（表示百万 token 模型），查询模型能力，并默认回退到 200K token。这是所有其他层引用的基础。</p>
+
+<h3>第三层：Token 计数</h3>
+
+<p><code>src/utils/tokens.ts</code> — <code>tokenCountWithEstimation()</code> 从最后一个已知的 API 使用点向后遍历。此后的所有内容为估算值，而非精确计数。这提供了快速、合理准确的计数，而无需从头重新计算所有内容。</p>
+
+<h3>第四层：自动 compact（主动）</h3>
+
+<p><code>src/query.ts:454</code> — 每次 API 调用前，系统检查 token 阈值。如果超出，它调用 <code>buildPostCompactMessages()</code>，运行摘要并生成压缩后的对话。这是主要的 compact 路径。</p>
+
+<h3>第五层：被动 compact</h3>
+
+<p><code>src/services/compact/reactiveCompact.ts</code> — 如果自动 compact 因某种原因错过了触发（竞态条件、意外的 token 激增），被动层捕获 413 prompt-too-long 错误。它运行一次性的 compact 并重试。没有重试循环 — 如果被动 compact 未能充分减少，错误会被传播出去。</p>
+
+<h3>第六层：微 compact</h3>
+
+<p><code>src/services/compact/microCompact.ts</code> — 在完整 compact 运行之前，微 compact 会折叠连续的相同工具结果。如果一个工具被调用了 5 次且结果相同，则仅保留 1 条记录。这通常足以减少 token 数量，从而避免完整摘要。</p>
+
+<h3>第七层：上下文折叠、会话记忆及 snip</h3>
+
+<p>三种专门的 compact 类型：</p>
+<ul>
+  <li><strong>上下文折叠</strong>（<code>src/services/contextCollapse/</code>）：使用 commit-log 模型生成投影读取时视图 — 每次折叠是状态的"提交"，LLM 看到摘要而非原始历史。</li>
+  <li><strong>会话记忆 compact</strong>（<code>src/services/compact/sessionMemoryCompact.ts</code>）：实验性功能，使用会话记忆数据生成更高质量的摘要。</li>
+  <li><strong>Snip compact</strong>（<code>src/query.ts:401</code>）：在对话发送前移除隐藏或有意 snip 的消息内容。</li>
+</ul>
+
+<h3>系统提示词组合</h3>
+
+<p><code>src/utils/systemPrompt.ts</code> — <code>buildEffectiveSystemPrompt()</code> 按优先级从 5 个源合并提示词：<code>override > coordinator > agent > custom > default</code>。每一层都可以添加、覆盖或删除段。这本身不是 compact，但它控制每次对话顶部的固定 token 开销。</p>
+
+<p>为什么这很重要：系统提示词是位于每次 API 调用顶部的固定开销。在 200K 窗口、90% 阈值下，10K token 的系统提示词仅留下 170K 用于实际对话 — 系统提示词永久消耗可用预算的 5%。分层组合配合 override 允许不同 agent 模式（coordinator、sub-agent、standalone）调整这一开销。</p>
+
+<h2>会话树模型（pi-mono、openclaw）</h2>
+
+<p>pi-mono 和 openclaw 共享一个基本不同的数据模型：历史是一棵由类型化条目组成的<strong>树</strong>，而非扁平数组。</p>
+
+<pre><code>// 简化的树结构
+type SessionEntry =
+  | { type: 'message', role, content }
+  | { type: 'compaction', summary, entriesCompacted }
+  | { type: 'branch_summary', branchId, summary }
+
+// buildSessionContext() 遍历树 → 扁平消息列表
+// beforeBranch → ... → compaction → afterCompaction → ... → current</code></pre>
+
+<p>该模型的关键属性：</p>
+<ul>
+  <li><strong>compact 被记录，而非销毁：</strong> 已 compact 的条目保留在树中。它们只是不包含在活跃上下文中。如果需要，可以"取消 compact"。</li>
+  <li><strong><code>CompactionSettings</code></strong>：<code>{ enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 }</code> — 始终为 LLM 响应和最近的几轮对话保留空间。</li>
+  <li><strong>跨轮 compact：</strong> 当 token 截断点落在工具调用轮的中间时（部分工具已返回，部分未返回），该轮的前缀和后缀都会被分别摘要。模型永远不会看到半完成的工具周期。</li>
+  <li><strong>文件操作追踪：</strong> 文件操作（读取、写入、编辑）跨会话追踪并附加到 compact 条目中，使摘要知道哪些文件被接触过。</li>
+  <li><strong>增量摘要更新：</strong> <code>UPDATE_SUMMARIZATION_PROMPT</code> 将新消息合并到现有摘要中，而不是从头重新摘要。这更经济且保持连续性。</li>
+</ul>
+
+<h2>三层记忆上下文（hermes-agent）</h2>
+
+<p>Hermes-agent 将三个来源组合为单一上下文：</p>
+
+<pre><code>┌─────────────┐  ┌──────────┐  ┌──────────────┐
+│  MEMORY.md   │  │ USER.md  │  │  SQLite FTS5 │
+│  （项目）     │  │ （用户）  │  │  （搜索）     │
+└──────┬───────┘  └────┬─────┘  └──────┬───────┘
+       └───────────────┼───────────────┘
+                       ▼
+              ContextCompressor
+</code></pre>
+
+<p><code>agent/context_compressor.py</code> 中的 <code>ContextCompressor</code> 运行一个五阶段算法：</p>
+
+<div class="diagram">
+┌─────────┐    ┌─────────────┐    ┌──────────────┐    ┌─────────────┐    ┌──────────────┐
+│  阶段 1  │ →  │   阶段 2    │ →  │   阶段 3      │ →  │   阶段 4    │ →  │   阶段 5      │
+│  修剪    │    │  边界判定   │    │  既有摘要     │    │  LLM 摘要   │    │   组装        │
+│          │    │             │    │               │    │              │    │              │
+│ 修剪冗长  │    │ 哪些消息    │    │ 更新 vs.      │    │ 生成         │    │ 前缀 +       │
+│ 工具输出  │    │ 保留原始 vs.│    │ 重新创建      │    │ 简洁         │    │ 摘要 +       │
+│          │    │ 被摘要     │    │ 摘要          │    │ 摘要         │    │ 最近消息     │
+└─────────┘    └─────────────┘    └──────────────┘    └─────────────┘    └──────────────┘
+</div>
+
+<ol>
+  <li><strong>修剪工具结果：</strong> 在一切之前先修剪冗长的工具输出。这是最便宜的缩减方式，通常自身就足够了。</li>
+  <li><strong>确定边界：</strong> 找到截断点 — 哪些消息保留为原始文本，哪些被摘要。</li>
+  <li><strong>搜索既有摘要：</strong> 如果摘要已经存在，则检索它，以便压缩器可以<em>更新</em>而非重新创建。</li>
+  <li><strong>生成 LLM 摘要：</strong> 调用 LLM 生成已修剪条目的简明摘要。</li>
+  <li><strong>组装：</strong> 将系统提示词 + 摘要（参考前缀）+ 最近消息组合成最终上下文。</li>
+</ol>
+
+<p>hermes-agent 方案的关键启发式：</p>
+
+<ul>
+  <li><strong>防抖动：</strong> <code>should_compress()</code> 在最近 2 次压缩各自节省的 token 都不足 10% 时跳过 compact。compact 是有成本的 — 如果效果不好，就停止。</li>
+  <li><strong>参考前缀：</strong> 摘要带有明确的指令前缀，说明它是<em>背景信息</em>，而非活跃指令。这防止模型将陈旧摘要当作命令处理。</li>
+  <li><strong>回退确定性摘要：</strong> 如果 LLM 摘要调用失败，压缩器回退到基于规则的摘要（提取每条消息的首句，上限 8K 字符）。</li>
+  <li><strong>预检查压缩：</strong> 在工具循环<em>开始之前</em>而非期间运行。最多 3 轮。这意味着 agent 永远不会以超载的上下文开始一轮。</li>
+</ul>
+
+<h2>带硬限制的文件引用系统（hermes-agent）</h2>
+
+<p>Hermes-agent 的 <code>@reference</code> 系统支持 <code>@file:</code>、<code>@folder:</code>、<code>@git:</code> 和 <code>@url:</code> 指令。引用会展开为其内容，但受制于<strong>上下文窗口 50% 的硬限制</strong> — 没有任何引用可以消耗超过一半的可用上下文。这防止单个大文件挤占对话历史。</p>
+
+<p>50% 的限制并非随意设定。它保证对话历史始终至少与注入引用有同样多的空间，这意味着模型可以始终以同等权重的历史上下文来"思考"注入的内容。90% 的限制会让引用占据主导；20% 的限制会让引用对大型文件变得无用。50% 是平衡的分割点。</p>
+
+<p><code>@folder:</code> 指令是四种指令中最危险的一个 — 递归展开目录树可能拉入数千个文件。Hermes-agent 通过先按文件大小估计展开条目，按相关性排序（使用 FTS5 索引），并在 50% 预算耗尽时停止来处理。</p>
+
+<h2>显式状态机（nanobot）</h2>
+
+<p>Nanobot 将上下文管理作为其轮次循环中的一等状态：</p>
+
+<pre><code>// nanobot/agent/loop.py — TurnState 枚举
+RESTORE → COMPACT → COMMAND → BUILD → RUN → SAVE → RESPOND → DONE</code></pre>
+
+<p>每个组件有明确的角色：</p>
+
+<ul>
+  <li><strong><code>AutoCompact</code></strong>（<code>nanobot/agent/autocompact.py</code>）：基于空闲会话 TTL 的归档。如果会话闲置，保留最后 8 条消息并摘要其余部分。这与每轮合并正交 — 它处理用户离开数小时后再回来的情况。</li>
+  <li><strong><code>Consolidator</code></strong>（<code>nanobot/agent/memory.py</code>）：<code>maybe_consolidate_by_tokens()</code> 每轮运行。如果上下文超出预算，最多运行 5 轮合并，每轮调用 LLM 压缩最旧的未压缩消息。多轮设计处理单次摘要遍次不足以充分缩减的情况 — 它持续进行直到上下文适应预算。</li>
+  <li><strong><code>ContextBuilder</code></strong>（<code>nanobot/agent/context.py</code>）：按以下顺序组装最终上下文：身份 → 引导文件 → 工具契约 → 记忆 → 技能 → 历史（上限 120 条消息）→ 会话摘要。顺序很重要：身份和工具契约是固定开销；历史是最易变的，也是最先被截断或摘要的内容。</li>
+</ul>
+
+<h2>钩子驱动与委托式方案</h2>
+
+<p>两个代码库采取了根本不同的方法 — 它们自己不实现 compact：</p>
+
+<p><strong>codex（钩子驱动）：</strong> compact 由 <code>codex-rs/hooks/src/events/compact.rs</code> 中的可配置钩子驱动。<code>PreCompactRequest</code> 和 <code>PostCompactRequest</code> 结构体携带关于要 compact 什么和已 compact 了什么的上下文。实际的摘要由<em>用户配置的 shell 命令</em>完成 — codex 没有内置的 LLM 摘要器。上下文片段由类型化标记定界，以便钩子脚本可以识别各部分。</p>
+
+<p>这种设计与 codex 对沙箱的哲学一致（第2课）：框架提供<em>事件</em>和<em>契约</em>，但策略完全由用户定义。<code>PostCompactRequest</code> 携带 compact 后的结果和之前/之后的 token 计数，让钩子决定是否接受或重做 compact。</p>
+
+<p><strong>opencode（委托）：</strong> compact 完全委托给外部的 <code>@opencode-ai/core</code> 包和 provider 层。OpenCode 本身不运行摘要 — 它依赖 provider 的原生上下文处理。这让 OpenCode 的代码库保持小巧，但意味着 compact 行为不透明且不可跨 provider 移植。</p>
+
+<p>权衡很明确：codex 和 opencode 有<em>零行摘要代码</em>需要维护、调试或安全审查。但它们也对摘要质量<em>零控制</em>。如果钩子脚本或 provider 产生糟糕的摘要，没有回退、没有补救。</p>
+
+<h2>为什么树模型重要</h2>
+
+<p>扁平和树之间的区别不只是数据结构选择 — 它决定了哪些操作是可能的：</p>
+
+<table>
+  <tr><th>操作</th><th>扁平数组（claude-code、hermes-agent、nanobot）</th><th>树（pi-mono、openclaw）</th></tr>
+  <tr><td><strong>撤销 compact</strong></td><td>必须保留旧数组副本或重新请求</td><td>更改哪些节点为"活跃" — 无数据丢失</td></tr>
+  <tr><td><strong>从对话中间分支</strong></td><td>复制数组到该点</td><td>添加新分支节点 — O(1)</td></tr>
+  <tr><td><strong>合并分支</strong></td><td>手动协调两个数组</td><td>遍历两棵子树，生成合并摘要节点</td></tr>
+  <tr><td><strong>以不同粒度重新摘要</strong></td><td>不能 — 原始消息已丢失</td><td>删除旧的 compact 节点，从保留的子节点创建新节点</td></tr>
+</table>
+
+<p>pi-mono 和 openclaw 选择树模型主要是为了支持分支 — 同一对话可以分叉到多个方向。但次要好处（可撤销、可重做的 compact）被证明同样有价值。</p>
+
+<h2>对比总表</h2>
+
+<table>
+  <tr><th>维度</th><th>claude-code</th><th>pi-mono</th><th>openclaw</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th></tr>
+  <tr><td><strong>Compact 类型</strong></td><td>主动 + 被动</td><td>被动</td><td>被动</td><td>主动（预检查）+ 被动</td><td>主动（每轮）</td><td>钩子（shell 命令）</td><td>委托（provider）</td></tr>
+  <tr><td><strong>摘要模型</strong></td><td>LLM（内部）</td><td>LLM（内部）</td><td>LLM（内部）</td><td>LLM + 回退规则</td><td>LLM（多轮）</td><td>无（外部）</td><td>无（委托）</td></tr>
+  <tr><td><strong>Token 估算</strong></td><td>从上次 API 调用向后遍历</td><td>Provider 报告 + 估算</td><td>Provider 报告 + 估算</td><td>tiktoken + 估算</td><td>tiktoken + 估算</td><td>tiktoken</td><td>Provider</td></tr>
+  <tr><td><strong>历史模型</strong></td><td>扁平数组 + commit-log 折叠</td><td>树（类型化条目）</td><td>树（类型化条目）</td><td>扁平数组</td><td>扁平数组（上限 120）</td><td>扁平数组（类型化标记）</td><td>扁平数组</td></tr>
+  <tr><td><strong>尾部保护</strong></td><td>预留 token + 自动 compact 阈值</td><td>keepRecentTokens: 20000</td><td>keepRecentTokens: 20000</td><td>防抖动（10% 底线）</td><td>保留最后 8 条消息</td><td>由钩子定义</td><td>由 Provider 定义</td></tr>
+  <tr><td><strong>独特功能</strong></td><td>七层体系 + 收益递减检测</td><td>跨轮 compact</td><td>增量摘要更新</td><td>参考前缀 + FTS5</td><td>五轮合并</td><td>完全可配置的钩子</td><td>零 compact 代码</td></tr>
+</table>
+
+<h2>设计启发</h2>
+
+<p>跨代码库成立的模式：</p>
+
+<div class="callout">
+  <strong>如果你控制上下文窗口大小，主动优于被动。</strong> Claude Code 和 hermes-agent 都在调用 LLM 之前检查 token。这避免浪费 API 调用，给用户更流畅的体验。被动只在 provider 控制窗口且你无法预测限制位置时才有意义。
+</div>
+
+<div class="callout">
+  <strong>如果你有多个上下文来源，树模型比扁平数组更清晰。</strong> pi-mono 的会话树将消息、compact 和分支摘要存储为类型化节点。这使得为会话中的任何点重建上下文、撤销 compact 或创建分支变得简单。扁平数组迫使你变更或复制历史。
+</div>
+
+<div class="callout">
+  <strong>用户文件（MEMORY.md、USER.md）在摘要中必须是"纯参考"的。</strong> Hermes-agent 的参考前缀是一个关键的安全措施：已 compact 的 MEMORY.md 内容应该通知模型，但绝不应覆盖用户的当前指令。在没有这一区分的情况下将记忆混入系统提示词会导致 agent 遵循陈旧的指令。
+</div>
+
+<div class="callout">
+  <strong>在进行 LLM 摘要之前修剪工具输出显著降低 compact 成本。</strong> 每个做 compact 的代码库都先修剪工具输出。Hermes-agent 的阶段 1（修剪）和 claude-code 的微 compact 都这样做。LLM 摘要是昂贵的 — 先修剪冗长的工具输出立刻就能回本。
+</div>
+
+<h2>compact 失败时会发生什么？</h2>
+
+<p>每个 compact 系统都可能失败 — LLM 摘要器返回垃圾结果、token 数量未充分下降、或 bug 破坏了摘要。各代码库如何处理：</p>
+
+<ul>
+  <li><strong>claude-code：</strong> 如果被动 compact 未能将上下文减到限制以下，错误会传播给用户。一次性设计意味着没有无限重试循环。</li>
+  <li><strong>hermes-agent：</strong> 确定性回退摘要（8K 字符，基于规则提取）保证即使 LLM 宕机也能生成<em>某种</em>摘要。防抖动检查也防止压缩器在无效 compact 上浪费 token。</li>
+  <li><strong>pi-mono / openclaw：</strong> 如果 LLM 摘要失败，compact 条目不会被创建，原始消息保留在树中。agent 以超载的上下文继续 — 这可能在下次调用时触发 provider 413 错误，但至少数据被保留了。</li>
+  <li><strong>nanobot：</strong> 多轮合并（最多 5 轮）提供自然的兜底。如果 5 轮后上下文仍然放不下，最旧的消息会被<em>截断</em>（非摘要）作为最后手段。</li>
+  <li><strong>codex：</strong> 钩子脚本完全控制失败处理。<code>PostCompactRequest</code> 携带之前/之后的 token 计数 — 一个编写良好的钩子可以检测到缩减不足并使用不同参数重试。</li>
+  <li><strong>opencode：</strong> 失败处理完全是 provider 的责任。如果 provider 的 compact 失败，agent 直接停止工作。</li>
+</ul>
+
+<h2>测验</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>测验</h3>
+
+  <div class="question">Q1. claude-code 使用什么阈值在每次 API 调用前触发主动自动 compact？</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">上下文窗口的 80%</div>
+    <div class="option" data-q="1" data-a="b">上下文窗口的 85%</div>
+    <div class="option" data-q="1" data-a="c">上下文窗口的 90%</div>
+    <div class="option" data-q="1" data-a="d">上下文窗口的 95%</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. hermes-agent 的 compact 防抖动规则是什么？</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">如果上次 compact 节省不到 20% 则跳过</div>
+    <div class="option" data-q="2" data-a="b">如果最近 2 次 compact 各自节省不到 10% 则跳过</div>
+    <div class="option" data-q="2" data-a="c">如果任何 compact 耗时超过 5 秒则跳过</div>
+    <div class="option" data-q="2" data-a="d">始终 compact — 从不跳过</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. pi-mono 如何处理 token 截断点落在工具调用轮次中间的情况？</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">完全丢弃不完整的轮次</div>
+    <div class="option" data-q="3" data-a="b">等待该轮完成后再 compact</div>
+    <div class="option" data-q="3" data-a="c">分别摘要前缀和后缀（跨轮 compact）</div>
+    <div class="option" data-q="3" data-a="d">将截断点移到最近的轮次边界</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'c', 2: 'b', 3: 'c' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ 正确。';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ 不太对 — 请重新阅读上方相关章节。';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>我们尚未涵盖的内容</h2>
+<ul>
+  <li><strong>流式 token 计数</strong> — 在活跃流式传输期间如何统计 token，以及流式传输和 compact 触发之间的交互。</li>
+  <li><strong>多 agent 上下文共享</strong> — 子 agent 如何从父 agent 继承或共享上下文（见<a href="0008-subagent-architecture.html">第8课</a>）。</li>
+  <li><strong>图片和附件上下文</strong> — 非文本内容（图片、PDF、二进制附件）如何消耗上下文窗口预算。</li>
+  <li><strong>跨会话记忆</strong> — 上下文如何<em>跨</em>会话持久化（见<a href="0006-memory-systems.html">第6课</a>）。</li>
+</ul>
+
+<h2>主要源码出处</h2>
+<ol>
+  <li><strong>claude-code</strong>：<code>src/query.ts:454</code>（自动 compact 触发），<code>src/query.ts:401</code>（snip compact），<code>src/query/tokenBudget.ts</code>（COMPLETION_THRESHOLD = 0.9，收益递减），<code>src/services/compact/reactiveCompact.ts</code>，<code>src/services/compact/microCompact.ts</code>，<code>src/services/compact/sessionMemoryCompact.ts</code>，<code>src/services/contextCollapse/</code>（commit-log 模型），<code>src/utils/context.ts</code>（getContextWindowForModel），<code>src/utils/tokens.ts</code>（tokenCountWithEstimation），<code>src/utils/systemPrompt.ts</code>（buildEffectiveSystemPrompt）</li>
+  <li><strong>pi-mono</strong>：<code>packages/agent/src/session-tree.ts</code>（类型化条目，树模型），<code>compaction.ts</code>（CompactionSettings，跨轮 compact，UPDATE_SUMMARIZATION_PROMPT），<code>buildSessionContext()</code></li>
+  <li><strong>openclaw</strong>：<code>packages/agent-core/src/session-tree.ts</code>（与 pi-mono 相同的树模型），<code>compaction.ts</code>（CompactionSettings，文件操作追踪）</li>
+  <li><strong>hermes-agent</strong>：<code>agent/context_compressor.py</code>（五阶段算法，should_compress 防抖动，参考前缀，回退确定性摘要，预检查压缩），<code>agent/references.py</code>（@file/@folder/@git/@url 系统，50% 硬限制），<code>config.py</code>（MEMORY.md、USER.md 路径）</li>
+  <li><strong>nanobot</strong>：<code>nanobot/agent/loop.py</code>（TurnState 枚举 — RESTORE→COMPACT→...→DONE），<code>nanobot/agent/autocompact.py</code>（AutoCompact，基于 TTL，保留最后 8 条），<code>nanobot/agent/memory.py</code>（Consolidator.maybe_consolidate_by_tokens，5 轮），<code>nanobot/agent/context.py</code>（ContextBuilder 组装顺序）</li>
+  <li><strong>codex</strong>：<code>codex-rs/hooks/src/events/compact.rs</code>（PreCompactRequest，PostCompactRequest，钩子驱动，类型化标记）</li>
+  <li><strong>opencode</strong>：<code>packages/core/src/</code>（委托给 @opencode-ai/core，provider 级 compact）</li>
+</ol>
+
+<h2>推荐后续阅读</h2>
+<ul>
+  <li>如果你想了解<strong>最复杂</strong>的 compact 系统：追踪 <code>claude-code/src/services/compact/</code> — 自动、被动、微、上下文折叠、会话记忆、snip 和 token 预算之间的七层交互。</li>
+  <li>如果你想了解<strong>最优雅</strong>的数据模型：阅读 <code>pi-mono/packages/agent/src/session-tree.ts</code> — 带跨轮 compact 的类型化条目树模型比扁平数组是更干净的基础。</li>
+  <li>如果你想了解<strong>最实用</strong>的启发式：研究 <code>hermes-agent/agent/context_compressor.py</code> — 防抖动规则、参考前缀和回退摘要都是可单独采纳的模式。</li>
+</ul>
+
+<div class="callout">
+  <strong>有问题可以追问。</strong> 如果本课中有任何不清楚的地方，或者你想深入了解某个特定代码库的上下文管理，可以向你的 agent 老师提问。所有代码库已克隆并索引在 <code>/home/shared/agent-study/repos/</code>。
+</div>
+
+<div class="nav">
+  <span><a href="0002-tool-system.html">&larr; 第2课：工具系统</a></span>
+  <span><a href="0004-permission-model.html">第4课：权限模型 &rarr;</a></span>
+</div>
+
+<script src="../../assets/lang-switcher.js"></script>
+</body>
+</html>

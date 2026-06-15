@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第5课：记忆架构 — working、short-term、long-term、consolidation</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  .tier-diagram { display: flex; justify-content: space-between; align-items: center; margin: 1.5rem 0; padding: 1rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.85rem; }
+  .tier-diagram .tier { text-align: center; flex: 1; }
+  .tier-diagram .tier .label { font-weight: 600; display: block; margin-bottom: 0.3rem; }
+  .tier-diagram .tier .detail { font-size: 0.78rem; color: #555; }
+  .tier-diagram .arrow { font-size: 1.5rem; color: #888; padding: 0 0.5rem; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="../../lessons/0005-memory-architecture.html" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>第5课：记忆架构</h1>
+<p class="subtitle">working、short-term、long-term —— 每个 agent 必须管理的三层记忆体系，以及七个代码库如何实现（或不实现）。</p>
+<p class="meta">2026年6月 · 7 个主要源代码库 · <a href="0005-memory-architecture.html">固定链接</a></p>
+
+<p class="sidenote">记忆是将无状态 API 调用与一个随时间<em>学习并改进的</em> agent 区分开来的关键。每个 agent 都面临同样的根本问题：LLM 上下文窗口是有限的，但对话、文件和经验是无界的。解决方案始终是分层架构 —— 但实现方式从完整的三层编排到"我们直接往 JSONL 里写数据就完事了"不等。</p>
+
+<p>在<a href="0003-context-management.html">第3课</a>中，我们介绍了 agent 如何管理 LLM 上下文窗口。在<a href="0004-permission-model.html">第4课</a>中，我们分析了权限控制。本课将视角扩展到更广泛的问题：<em>agent 记住什么，存储在哪里，以及如何在正确的时间检索到正确的记忆？</em></p>
+
+<h2>记忆的三个层级</h2>
+
+<p>每个 agent 记忆架构都可以分解为恰好三个层次：</p>
+
+<div class="tier-diagram">
+  <div class="tier">
+    <span class="label">Working Memory（工作记忆）</span>
+    <span class="detail">上下文内<br>仅当前对话<br>约 100K token</span>
+  </div>
+  <span class="arrow">&rarr;</span>
+  <div class="tier">
+    <span class="label">Short-Term Memory（短期记忆）</span>
+    <span class="detail">会话范围内<br>消息、文件、笔记<br>数小时到数天</span>
+  </div>
+  <span class="arrow">&rarr;</span>
+  <div class="tier">
+    <span class="label">Long-Term Memory（长期记忆）</span>
+    <span class="detail">持久化存储<br>跨会话、跨天数<br>数周到数月</span>
+  </div>
+</div>
+
+<p><strong>Working memory</strong> 就是 LLM 上下文窗口本身——模型当前能"看到"的消息。<strong>Short-term memory</strong> 是会话历史，能够在单轮对话间存活但无法跨会话持久。<strong>Long-term memory</strong> 是持久化的：跨会话、跨天数，最终跨月存储。</p>
+
+<p>困难的问题不在于存储——而在于<em>检索</em>。存储一切很简单。在正确的时间将正确的记忆注入到正确的上下文窗口中，才是整个游戏的关键所在。</p>
+
+<h2>hermes-agent：定义性的三层架构</h2>
+
+<p>Hermes-agent 是这个集合中最复杂的记忆系统。它实现了全部三个层级，配备了后台守护进程、全文搜索、skill 生命周期管理，以及 cron 驱动的建议提案。其他所有代码库要么省略了某个层级，要么以更简单的形式实现它。</p>
+
+<h3>MemoryManager：prefetch &rarr; inject &rarr; sync</h3>
+
+<p><code>agent/memory_manager.py:252</code> 中的 <code>MemoryManager</code> 在每一轮中编排一个三阶段流水线：</p>
+
+<pre><code># agent/memory_manager.py:252 — MemoryManager 编排
+class MemoryManager:
+  def __call__(self, agent: Agent, ctx: AgentContext, turns: list[Turn]):
+    # Phase 1: Prefetch — 在 LLM 调用前拉取相关记忆
+    relevant = self._prefetch_memories(ctx, turns)
+    # Phase 2: Inject — 将记忆插入到 system prompt 中
+    ctx = self._inject_memories(ctx, relevant)
+    # Phase 3: Sync — 后台线程进行新记忆提取
+    self._start_sync_thread(agent, turns)</code></pre>
+
+<p><strong>prefetch</strong> 阶段是最关键的。在每次 LLM 调用之前，MemoryManager 使用带 FTS5 全文搜索的 SQLite 查找与当前对话相关的记忆。它从最近的轮次中提取关键词，并与已存储的记忆条目进行匹配。</p>
+
+<p><strong>inject</strong> 阶段将检索到的记忆插入到 system prompt 中的一个仅参考块中——agent 可以看到它们，但不能将其视为活动指令。这个区分至关重要：用户管理的文件（如 MEMORY.md）必须是提供信息，而非发号施令。</p>
+
+<p><strong>sync</strong> 阶段启动一个后台守护线程（通过 <code>background_review.py</code>），回放对话并向 LLM 询问："这次交流中是否应该保存任何 skill 或 memory？" 这是异步发生的，永远不会阻塞主 agent 循环。</p>
+
+<h3>存储：SQLite 配合 FTS5 + 中日韩三元语法</h3>
+
+<p><code>hermes_state.py</code> 中的存储层使用 SQLite 并启用 WAL 模式，以支持写入期间并发读取。Schema 包括 FTS5 全文搜索，支持标准分词和中日韩三元语法（trigram）支持（适用于中文、日文、韩文文本）。触发器在 insert/update/delete 时保持 FTS 索引与主表同步。</p>
+
+<pre><code># hermes_state.py — FTS5 配合中日韩三元语法支持
+CREATE VIRTUAL TABLE memories_fts USING fts5(
+  title, content, tags,
+  tokenize='trigram'  -- 中日韩 + 标准文本搜索
+);
+CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+  INSERT INTO memories_fts(rowid, title, content, tags)
+  VALUES (new.rowid, new.title, new.content, new.tags);
+END;</code></pre>
+
+<p>人类可读层位于 <code>~/.hermes/memories/</code>，以 MEMORY.md 和 USER.md 文件的形式存在。这些是基础真相 —— SQLite 数据库是派生的索引，而非真相来源。用户可以直接编辑这些文件，agent 在下一次加载时予以尊重。</p>
+
+<h3>后台审查与 skill 策展</h3>
+
+<p>两个后台系统随时间推移维护记忆健康：</p>
+
+<p><strong>Background Review（后台审查）</strong>（<code>agent/background_review.py</code>）：一个守护线程，在每一轮后回放对话并向 LLM 提出一个问题："是否应该从此对话中保存任何 skill 或 memory？"这是提取机制 —— 由 LLM 决定什么值得保留，而非启发式规则。</p>
+
+<p><strong>Skill Curator（skill 策展器）</strong>（<code>agent/curator.py</code>）：管理已保存 skill 的生命周期。Skill 自动在状态间转换：<em>active</em>（最近使用过）&rarr; <em>stale</em>（30天未使用）&rarr; <em>archive</em>（90天未使用）。这防止了记忆膨胀，并保持活跃集的相关性。</p>
+
+<p><strong>Cron Suggestions（cron 建议）</strong>（<code>cron/suggestions.py</code>）：一个经验驱动的系统，分析过去的交互并提议新的 cron 作业。如果 agent 注意到一个模式——"你总是在周一早上要求 standup 摘要"——它可以建议将其自动化。</p>
+
+<h2>Claude Code：基于文件的记忆层级</h2>
+
+<p>Claude Code 采用面向文件的方法。记忆不是使用数据库，而是以众所周知路径下的 markdown 文件形式组织，按严格的优先级顺序加载。</p>
+
+<h3>四层 CLAUDE.md 加载</h3>
+
+<p><code>src/utils/claudemd.ts</code> 加载器从四个层次解析 CLAUDE.md 文件，按越来越具体的顺序合并：</p>
+
+<ol>
+  <li><strong>Managed（托管层）：</strong> <code>/etc/claude/claudemd/</code> —— 系统级，管理员控制</li>
+  <li><strong>User（用户层）：</strong> <code>~/.claude/CLAUDE.md</code> —— 个人级，跨项目</li>
+  <li><strong>Project（项目层）：</strong> 仓库根目录中的 <code>CLAUDE.md</code>，加上 <code>.claude/CLAUDE.md</code> —— 团队共享</li>
+  <li><strong>Local（本地层）：</strong> <code>CLAUDE.local.md</code> —— 每个开发者独立，已 .gitignore</li>
+</ol>
+
+<p>较高层级设定策略；较低层级添加具体内容。项目级 CLAUDE.md 无法覆盖托管层的指令，但可以添加项目特定的指令。</p>
+
+<h3>MEMORY.md 系统</h3>
+
+<p><code>src/memdir/</code> 模块管理 MEMORY.md 文件，有严格限制：最多 200 行或 25KB，以先触发者为准。它支持 <code>@include</code> 指令，用于将大型记忆拆分为多个文件，并在 agent 积累足够上下文后自动写入记忆文件。</p>
+
+<h3>Session memory（会话记忆）</h3>
+
+<p><code>src/services/SessionMemory/sessionMemory.ts</code> 为每个会话维护自动生成的 markdown 笔记。这些笔记记录会话期间发生的事情——接触过的文件、做出的决策、遇到的问题——并将其持久化到磁盘供以后审查。</p>
+
+<h3>Memory consolidation（记忆整理）</h3>
+
+<p>Claude Code 中的 consolidation 由 token 阈值触发：至少 10,000 token 才能启动，且两次更新之间至少间隔 5,000 token。一个 forked subagent 从对话中提取关键信息——它作为独立进程运行，因此永远不会阻塞主 agent。consolidation agent 被赋予聚焦的 prompt：提取事实、决策和模式，而非原始对话。</p>
+
+<pre><code>// src/services/SessionMemory/consolidation.ts — 阈值
+const MIN_TOKENS_TO_INIT = 10_000;
+const MIN_TOKENS_BETWEEN_UPDATES = 5_000;
+// Consolidation 以 forked subagent 方式运行：
+// spawn(claude, ["--agent", "memory-consolidator", ...])</code></pre>
+
+<h2>Nanobot：文件 I/O 配合 Consolidator</h2>
+
+<p>Nanobot 的记忆系统是基于文件的，但增加了一个增量 consolidation 机制，这是 Claude Code 较简单的阈值方法所缺乏的。</p>
+
+<h3>MemoryStore：四个文件 + 历史记录</h3>
+
+<p><code>nanobot/agent/memory.py:40</code> 定义了带有五个持久化产物的 <code>MemoryStore</code>：</p>
+
+<pre><code># nanobot/agent/memory.py:40 — MemoryStore
+class MemoryStore:
+  def __init__(self, root_dir: Path):
+    self.memory_md    = root_dir / "MEMORY.md"     # 持久记忆
+    self.user_md      = root_dir / "USER.md"       # 用户偏好
+    self.soul_md      = root_dir / "SOUL.md"       # agent 身份
+    self.history_jsonl = root_dir / "history.jsonl" # 整理后的日志
+    self.cursor        = 0                          # 最后一次整理的位置</code></pre>
+
+<p><strong>SOUL.md</strong> 文件在所有 7 个代码库中是独一无二的——它定义了 agent 的个性和行为约束，与事实记忆（MEMORY.md）和用户偏好（USER.md）分开。这种三部分划分（身份、事实、偏好）是一种干净的分离，其他代码库将其混在更少的文件中。</p>
+
+<h3>Consolidator：增量 LLM 摘要</h3>
+
+<p><code>memory.py:602</code> 中的 <code>Consolidator</code> 名副其实：它将旧消息增量摘要到 <code>history.jsonl</code> 中。它使用基于<strong>游标</strong>的方法——通过 <code>cursor</code> 字段跟踪哪些消息已经被整理，因此每次运行只处理新消息。</p>
+
+<p>consolidation 边界算法在<strong>用户轮次边界</strong>处选择安全的切割点。它永远不会在 agent 响应的中间切分对话——切割总是在用户消息和下一条 agent 消息之间。这保持了摘要中的对话连贯性。</p>
+
+<h3>AutoCompact：空闲会话归档</h3>
+
+<p><code>nanobot/autocompact.py:17</code> 提供了 <code>AutoCompact</code>，一种基于 TTL 的归档机制。如果会话在配置的时间之外处于空闲状态，AutoCompact 触发 consolidation 并归档完整的对话记录。这防止了长期运行但不常使用的 agent 出现磁盘膨胀。</p>
+
+<h3>基于 Git 的版本控制</h3>
+
+<p>SOUL.md、USER.md 和 MEMORY.md 通过 <code>GitStore</code> 封装进行版本控制。对这些文件的每次更改都会用描述性消息提交，为用户提供 agent 记忆如何演变的审计跟踪。<code>history.jsonl</code> 不进行版本控制——它被视为缓存。</p>
+
+<h2>Codex：SQLite + 两阶段提取</h2>
+
+<p>Codex 使用关系型方法，包含四个独立的 SQLite 数据库和两阶段记忆提取流水线。</p>
+
+<h3>四个数据库</h3>
+
+<p>Codex 维护四个 SQLite 数据库，每个有不同的关注点：</p>
+
+<ul>
+  <li><strong>State DB：</strong> 运行时状态、工具结果、对话元数据</li>
+  <li><strong>Logs DB：</strong> 结构化日志条目，用于调试和可观测性</li>
+  <li><strong>Goals DB：</strong> 跨会话的持久化目标跟踪</li>
+  <li><strong>Memories DB：</strong> <code>memories_1.sqlite</code> —— 长期记忆存储</li>
+</ul>
+
+<h3>两阶段提取流水线</h3>
+
+<p><code>codex-rs/state/src/runtime/memories.rs:28</code> 实现带有两阶段提取流水线的 <code>MemoryStore</code>：</p>
+
+<pre><code>// codex-rs/state/src/runtime/memories.rs:28
+// Stage 1: 线程级提取 —— 每个对话线程运行一次
+// Phase 2: 全局 consolidation —— 跨线程合并，6 小时冷却
+pub struct MemoryStore {
+  db: SqlitePool,
+  last_global_consolidation: Instant,  // 6 小时冷却
+  // ...
+}</code></pre>
+
+<p><strong>Stage 1</strong> 从单个对话线程中提取记忆——决定了什么，学到了什么。这在足够多的轮次后频繁运行。</p>
+
+<p><strong>Phase 2</strong> 执行全局 consolidation——将来自多个线程的记忆合并到统一的知识库中。它在 6 小时冷却周期内运行，以避免冗余的 LLM 调用。冷却时间是每进程的（非持久化），因此在重启时重置。</p>
+
+<p>两阶段设计体现了一个关键洞察：线程级提取成本低，可以频繁运行，但跨线程 consolidation 成本高，应该批量处理。</p>
+
+<h2>Minimal memory：pi-mono、openclaw 和 opencode</h2>
+
+<h3>pi-mono：仅 JSONL 会话</h3>
+
+<p>pi-mono 在所有代码库中拥有最简单的记忆方案：JSONL 会话文件。仅此而已。没有 MEMORY.md，没有 consolidation，没有 skill 学习，没有后台提取。每个会话被写入 <code>.jsonl</code> 文件以供重放，但没有机制让信息跨越会话边界。为什么？pi-mono 被设计为一个研究框架，记忆是消费者的责任——框架提供循环、钩子和工具，应用开发者决定要记住什么。</p>
+
+<h3>openclaw：SDK 可用，非默认</h3>
+
+<p>openclaw 提供了带有 SQLite 存储和可选 embedding 语义搜索的 <strong>Memory Host SDK</strong>。然而，它<strong>默认不被使用</strong>。该 SDK 可供想要接入的消费者使用，但框架本身的运行不包含任何长期记忆。这反映了 openclaw 的设计理念：提供能力，不强制集成。</p>
+
+<h3>opencode：仅 localStorage</h3>
+
+<p>OpenCode 的 <code>packages/app/src/utils/persist.ts</code> 将 UI 状态持久化到 localStorage——如面板宽度、排序顺序和筛选偏好。完全没有 agent 记忆系统。持久化纯粹是针对面向用户的 UI，而非 agent 的知识。这与 OpenCode 定位为轻量编码助手而非持久化 agent 是一致的。</p>
+
+<h2>对比表格</h2>
+
+<table>
+  <tr><th>维度</th><th>hermes-agent</th><th>claude-code</th><th>nanobot</th><th>codex</th><th>pi-mono</th><th>openclaw</th><th>opencode</th></tr>
+  <tr>
+    <td><strong>Working memory</strong></td>
+    <td>注入 system prompt 块</td>
+    <td>四层 CLAUDE.md 合并</td>
+    <td>MEMORY.md + USER.md + SOUL.md</td>
+    <td>上下文内目标状态</td>
+    <td>无（消息数组）</td>
+    <td>无（消息数组）</td>
+    <td>无（仅聊天）</td>
+  </tr>
+  <tr>
+    <td><strong>Short-term</strong></td>
+    <td>会话轮次历史</td>
+    <td>会话 markdown 笔记</td>
+    <td>history.jsonl（基于游标）</td>
+    <td>State DB + Logs DB</td>
+    <td>JSONL 会话转储</td>
+    <td>JSONL 会话转储</td>
+    <td>无</td>
+  </tr>
+  <tr>
+    <td><strong>Long-term</strong></td>
+    <td>SQLite FTS5 + MEMORY.md 文件</td>
+    <td>MEMORY.md（~/.claude/memdir）</td>
+    <td>MEMORY.md + SOUL.md（Git 支持）</td>
+    <td>memories_1.sqlite</td>
+    <td>无</td>
+    <td>可选 SDK（SQLite + embedding）</td>
+    <td>无</td>
+  </tr>
+  <tr>
+    <td><strong>Consolidation</strong></td>
+    <td>后台守护线程，每轮执行</td>
+    <td>Forked subagent，阈值门控</td>
+    <td>增量 LLM 摘要</td>
+    <td>两阶段：线程级 + 全局（6h 冷却）</td>
+    <td>无</td>
+    <td>默认不启用</td>
+    <td>无</td>
+  </tr>
+  <tr>
+    <td><strong>Skill 创建</strong></td>
+    <td>Background review + curator 生命周期</td>
+    <td>无（用户管理）</td>
+    <td>无（用户管理）</td>
+    <td>目标跟踪（goals DB）</td>
+    <td>无</td>
+    <td>无</td>
+    <td>无</td>
+  </tr>
+  <tr>
+    <td><strong>搜索</strong></td>
+    <td>FTS5 + 中日韩三元语法</td>
+    <td>文件 glob + grep</td>
+    <td>基于游标的增量</td>
+    <td>SQL 查询</td>
+    <td>无</td>
+    <td>Embedding（可选）</td>
+    <td>无</td>
+  </tr>
+  <tr>
+    <td><strong>独特之处</strong></td>
+    <td>Cron 建议提案</td>
+    <td>四层 CLAUDE.md 合并</td>
+    <td>SOUL.md 身份文件 + Git 版本控制</td>
+    <td>四数据库分离 + 冷却门控</td>
+    <td>零记忆设计</td>
+    <td>选择性接入 SDK 架构</td>
+    <td>仅 UI 持久化</td>
+  </tr>
+</table>
+
+<h2>设计启发</h2>
+
+<div class="callout">
+  <strong>"记忆只有在正确的时间可检索时才是有用的——prefetch 是全部关键。"</strong> 存储记忆是简单的部分。困难的部分是在 agent 需要时，恰好将正确的记忆呈现到上下文窗口中。Hermes-agent 的 prefetch 阶段、Claude Code 的分层 CLAUDE.md 加载以及 Codex 的 SQL 查询都解决同一个问题：检索时机。
+</div>
+
+<div class="callout">
+  <strong>"Consolidation 应该在后台进行，永远不要阻塞主循环。"</strong> 每个具有 consolidation 的代码库（hermes-agent、claude-code、nanobot、codex）都是异步运行的。Hermes-agent 使用守护线程。Claude Code fork 了一个 subagent 进程。Codex 使用 6 小时冷却门控。主 agent 循环永远不应该等待 consolidation 运行——用户的轮次时间是神圣的。
+</div>
+
+<div class="callout">
+  <strong>"用户管理的文件（MEMORY.md）在上下文中必须是'仅参考'——永远不要视为活动指令。"</strong> Hermes-agent 将记忆注入到 system prompt 的参考块中。Claude Code 将 CLAUDE.md（指令）与 MEMORY.md（知识）分开。这个区别很重要：用户写指令；agent 写记忆。混淆它们会导致 agent 将其自身过时的记忆当作命令来执行。
+</div>
+
+<div class="callout">
+  <strong>"陈旧度会衰减——没有生命周期管理的记忆会变成噪音。"</strong> Hermes-agent 的 curator 是唯一具有明确生命周期管理的系统：active &rarr; stale（30天）&rarr; archive（90天）。没有它，长期运行的 agent 会积累杂物——旧事实、已解决的 TODO 和稀释检索信号的不相关上下文。
+</div>
+
+<div class="callout">
+  <strong>"安全的切割点对连贯性很重要。"</strong> Nanobot 的 consolidator 仅在用户轮次边界处分割。Codex 将线程内的 consolidation 与全局 consolidation 分开。两者都认识到任意截断会产生不连贯的摘要。切割点必须尊重对话结构。
+</div>
+
+<h2>为什么 pi-mono 没有记忆</h2>
+
+<p>pi-mono 中记忆的缺失是一个设计决策，而非遗漏。pi-mono 是一个研究框架——它提供 agent 循环、钩子和工具接口，并将记忆留给消费者。这与"原语，而非功能"的理念一致：给开发者构建块，而非预设好的记忆架构。</p>
+
+<p>但这有实际成本：每个 pi-mono 消费者必须构建自己的记忆系统。如果不这样做，他们的 agent 就没有持久知识。这对于一次性编码任务来说是可以接受的；对于长期运行的 agent 来说则是致命的。</p>
+
+<h2>练习：分类记忆系统</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>测验</h3>
+
+  <div class="question">Q1. 哪个代码库实现了 skill curator，根据使用年限自动将 skill 从 active 转换为 stale 再到 archive？</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">claude-code</div>
+    <div class="option" data-q="1" data-a="b">nanobot</div>
+    <div class="option" data-q="1" data-a="c">hermes-agent</div>
+    <div class="option" data-q="1" data-a="d">codex</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. hermes-agent 的 MemoryManager 流水线三个阶段是什么？</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">store、query、delete</div>
+    <div class="option" data-q="2" data-a="b">prefetch、inject、sync</div>
+    <div class="option" data-q="2" data-a="c">load、merge、persist</div>
+    <div class="option" data-q="2" data-a="d">extract、summarize、archive</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. Claude Code 启动 memory consolidation 的最低 token 阈值是多少？</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">5,000 token</div>
+    <div class="option" data-q="3" data-a="b">20,000 token</div>
+    <div class="option" data-q="3" data-a="c">10,000 token</div>
+    <div class="option" data-q="3" data-a="d">50,000 token</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+
+  <div class="question">Q4. 哪个代码库独特地拥有 SOUL.md 文件，将 agent 身份与事实记忆和用户偏好分离？</div>
+  <div class="options">
+    <div class="option" data-q="4" data-a="a">hermes-agent</div>
+    <div class="option" data-q="4" data-a="b">claude-code</div>
+    <div class="option" data-q="4" data-a="c">nanobot</div>
+    <div class="option" data-q="4" data-a="d">codex</div>
+  </div>
+  <div class="feedback" id="feedback4"></div>
+
+  <div class="question">Q5. Codex 如何防止冗余的全局 consolidation 运行？</div>
+  <div class="options">
+    <div class="option" data-q="5" data-a="a">Token 计数阈值</div>
+    <div class="option" data-q="5" data-a="b">文件修改时间戳</div>
+    <div class="option" data-q="5" data-a="c">6 小时冷却</div>
+    <div class="option" data-q="5" data-a="d">仅手动触发</div>
+  </div>
+  <div class="feedback" id="feedback5"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'c', 2: 'b', 3: 'c', 4: 'c', 5: 'c' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ 正确。';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ 不对——请重新阅读上面相关部分。';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>我们没有涵盖的内容</h2>
+<ul>
+  <li><strong>用于语义记忆搜索的向量 embedding</strong> —— openclaw 的可选 SDK 支持此功能，但默认未使用。基于语义搜索记忆是一个不断发展的领域，但目前只有 openclaw 提供了该能力。</li>
+  <li><strong>多 agent 系统中的记忆</strong> —— 当多个 agent 协作时，记忆如何共享或分区。在<a href="0008-multi-agent.html">第8课</a>中涵盖。</li>
+  <li><strong>从上下文中驱逐记忆</strong> —— 一旦记忆被注入到 working memory 中，何时移除它？在<a href="0003-context-management.html">第3课</a>中涵盖。</li>
+</ul>
+
+<h2>主要来源</h2>
+<ol>
+  <li><strong>hermes-agent</strong>：<code>agent/memory_manager.py:252</code>（MemoryManager）、<code>hermes_state.py</code>（SQLite + FTS5）、<code>agent/background_review.py</code>（daemon review）、<code>agent/curator.py</code>（skill lifecycle）、<code>cron/suggestions.py</code>（cron proposals）</li>
+  <li><strong>claude-code</strong>：<code>src/utils/claudemd.ts</code>（四层 CLAUDE.md 加载器）、<code>src/memdir/</code>（MEMORY.md 系统）、<code>src/services/SessionMemory/sessionMemory.ts</code>（会话笔记）、consolidation subagent（forked process，阈值门控）</li>
+  <li><strong>nanobot</strong>：<code>nanobot/agent/memory.py:40</code>（MemoryStore）、<code>:602</code>（Consolidator）、<code>nanobot/autocompact.py:17</code>（AutoCompact）、GitStore（SOUL.md、USER.md、MEMORY.md 版本控制）</li>
+  <li><strong>codex</strong>：<code>codex-rs/state/src/runtime/memories.rs:28</code>（MemoryStore）、4 个 SQLite 数据库（state、logs、goals、memories_1.sqlite）、两阶段提取（线程级 + 全局，6h 冷却）</li>
+  <li><strong>pi-mono</strong>：仅 JSONL 会话文件 —— 无 MEMORY.md、无 consolidation、无 skill 学习、无跨会话记忆</li>
+  <li><strong>openclaw</strong>：Memory Host SDK（SQLite + 可选 embedding）—— 可用但默认未使用</li>
+  <li><strong>opencode</strong>：<code>packages/app/src/utils/persist.ts</code> —— 仅 UI 状态的 localStorage，无 agent 记忆系统</li>
+</ol>
+
+<h2>推荐下一步阅读</h2>
+<ul>
+  <li>如果你想要<strong>最复杂</strong>的记忆系统：追踪 <code>hermes-agent/agent/memory_manager.py</code> 和 <code>hermes_state.py</code> —— 带有 FTS5 的 prefetch-inject-sync 流水线是黄金标准。</li>
+  <li>如果你想要<strong>最实用</strong>的模式：阅读 <code>nanobot/nanobot/agent/memory.py</code> —— 带有基于游标的增量摘要的 Consolidator 是干净、可测试且易于采纳的。</li>
+  <li>如果你想要<strong>简单且可行的</strong>：研究 Claude Code 的 <code>src/memdir/</code> —— 带有 @include 指令和大小限制的基于文件的 MEMORY.md 是最小化且久经考验的。</li>
+</ul>
+
+<div class="callout">
+  <strong>提出后续问题。</strong> 如果本课中有什么不清楚的地方，或者你想深入了解某个特定代码库的记忆系统，请问你的 agent 老师。所有代码库已克隆并建立索引，位于 <code>/home/shared/agent-study/repos/</code>。
+</div>
+
+<div class="nav">
+  <span><a href="0004-permission-model.html">&larr; 第4课：权限模型</a></span>
+  <span><a href="0006-rendering-pipeline.html">第6课：渲染流水线 &rarr;</a></span>
+</div>
+
+<script src="../../assets/lang-switcher.js"></script>
+</body>
+</html>

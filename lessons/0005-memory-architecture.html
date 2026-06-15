@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0005: Memory Architecture — working, short-term, long-term, consolidation</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  .tier-diagram { display: flex; justify-content: space-between; align-items: center; margin: 1.5rem 0; padding: 1rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.85rem; }
+  .tier-diagram .tier { text-align: center; flex: 1; }
+  .tier-diagram .tier .label { font-weight: 600; display: block; margin-bottom: 0.3rem; }
+  .tier-diagram .tier .detail { font-size: 0.78rem; color: #555; }
+  .tier-diagram .arrow { font-size: 1.5rem; color: #888; padding: 0 0.5rem; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="#" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>Lesson 0005: Memory Architecture</h1>
+<p class="subtitle">Working, short-term, long-term — the three memory tiers that every agent must manage, and how seven codebases do it (or don't).</p>
+<p class="meta">June 2026 · 7 primary source codebases · <a href="0005-memory-architecture.html">Permalink</a></p>
+
+<p class="sidenote">Memory is what separates a stateless API call from an agent that <em>learns and improves over time</em>. Every agent faces the same fundamental problem: the LLM context window is finite, but conversations, files, and experiences are unbounded. The solution is always a tiered architecture — but the implementations range from full 3-layer orchestration to "we just dump JSONL and call it a day."</p>
+
+<p>In <a href="0003-context-management.html">Lesson 0003</a> we covered how agents manage the LLM context window. In <a href="0004-permission-model.html">Lesson 0004</a> we examined access control. This lesson zooms out to the broader question: <em>what does the agent remember, where does it store it, and how does it retrieve the right memory at the right time?</em></p>
+
+<h2>The three tiers of memory</h2>
+
+<p>Every agent memory architecture decomposes into exactly three levels:</p>
+
+<div class="tier-diagram">
+  <div class="tier">
+    <span class="label">Working Memory</span>
+    <span class="detail">In-context<br>Active conversation only<br>~100K tokens</span>
+  </div>
+  <span class="arrow">&rarr;</span>
+  <div class="tier">
+    <span class="label">Short-Term Memory</span>
+    <span class="detail">Session-scoped<br>Messages, files, notes<br>Hours to days</span>
+  </div>
+  <span class="arrow">&rarr;</span>
+  <div class="tier">
+    <span class="label">Long-Term Memory</span>
+    <span class="detail">Durable storage<br>Across sessions, across days<br>Weeks to months</span>
+  </div>
+</div>
+
+<p><strong>Working memory</strong> is the LLM context window itself — the messages the model can "see" right now. <strong>Short-term memory</strong> is the session history that survives individual turns but not individual sessions. <strong>Long-term memory</strong> is durable: it spans sessions, days, and eventually months.</p>
+
+<p>The hard problem is not storage — it's <em>retrieval</em>. Storing everything is easy. Getting the right memory injected into the right context window at the right time is the entire game.</p>
+
+<h2>hermes-agent: The defining 3-layer architecture</h2>
+
+<p>Hermes-agent is the most sophisticated memory system in the set. It implements all three tiers with a background daemon, full-text search, skill lifecycle management, and cron-driven suggestion proposals. Every other codebase either omits a tier or implements it in a simpler form.</p>
+
+<h3>MemoryManager: prefetch &rarr; inject &rarr; sync</h3>
+
+<p>The <code>MemoryManager</code> in <code>agent/memory_manager.py:252</code> orchestrates a three-phase pipeline on every turn:</p>
+
+<pre><code># agent/memory_manager.py:252 — MemoryManager orchestration
+class MemoryManager:
+  def __call__(self, agent: Agent, ctx: AgentContext, turns: list[Turn]):
+    # Phase 1: Prefetch — pull relevant memories before the LLM call
+    relevant = self._prefetch_memories(ctx, turns)
+    # Phase 2: Inject — insert memories into the system prompt
+    ctx = self._inject_memories(ctx, relevant)
+    # Phase 3: Sync — background thread for new memory extraction
+    self._start_sync_thread(agent, turns)</code></pre>
+
+<p>The <strong>prefetch</strong> phase is the critical one. Before each LLM call, the MemoryManager queries SQLite with FTS5 full-text search to find memories relevant to the current conversation. It uses keyword extraction from recent turns and matches against stored memory entries.</p>
+
+<p>The <strong>inject</strong> phase inserts retrieved memories into the system prompt in a reference-only block — the agent can see them but cannot treat them as active instructions. This distinction is crucial: user-managed files like MEMORY.md must inform, not command.</p>
+
+<p>The <strong>sync</strong> phase spawns a background daemon thread (via <code>background_review.py</code>) that replays the conversation and asks the LLM: "should any skill or memory be saved from this exchange?" This happens asynchronously, never blocking the main agent loop.</p>
+
+<h3>Storage: SQLite with FTS5 + CJK trigram</h3>
+
+<p>The storage layer in <code>hermes_state.py</code> uses SQLite with WAL mode for concurrent reads during writes. The schema includes FTS5 full-text search with both standard tokenization and CJK trigram support (for Chinese, Japanese, Korean text). Triggers keep the FTS index synchronized with the main table on insert/update/delete.</p>
+
+<pre><code># hermes_state.py — FTS5 with CJK trigram support
+CREATE VIRTUAL TABLE memories_fts USING fts5(
+  title, content, tags,
+  tokenize='trigram'  -- CJK + standard text search
+);
+CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+  INSERT INTO memories_fts(rowid, title, content, tags)
+  VALUES (new.rowid, new.title, new.content, new.tags);
+END;</code></pre>
+
+<p>The human-readable layer lives at <code>~/.hermes/memories/</code> as MEMORY.md and USER.md files. These are the ground truth — the SQLite database is a derived index, not the source of truth. Users can edit these files directly, and the agent respects them on next load.</p>
+
+<h3>Background review and skill curation</h3>
+
+<p>Two background systems maintain memory health over time:</p>
+
+<p><strong>Background Review</strong> (<code>agent/background_review.py</code>): A daemon thread that replays the conversation after each turn and asks the LLM a single question: "should any skill or memory be saved from this conversation?" This is the extraction mechanism — the LLM decides what's worth keeping, not a heuristic.</p>
+
+<p><strong>Skill Curator</strong> (<code>agent/curator.py</code>): Manages the lifecycle of saved skills. Skills auto-transition through states: <em>active</em> (used recently) &rarr; <em>stale</em> (unused for 30 days) &rarr; <em>archive</em> (unused for 90 days). This prevents memory bloat and keeps the active set relevant.</p>
+
+<p><strong>Cron Suggestions</strong> (<code>cron/suggestions.py</code>): An experience-driven system that analyzes past interactions and proposes new cron jobs. If the agent notices a pattern — "you always ask for a standup summary on Monday mornings" — it can suggest automating it.</p>
+
+<h2>Claude Code: File-based memory hierarchy</h2>
+
+<p>Claude Code takes a file-oriented approach. Instead of a database, memory is structured as markdown files at well-known paths, loaded in a strict precedence order.</p>
+
+<h3>4-tier CLAUDE.md loading</h3>
+
+<p>The <code>src/utils/claudemd.ts</code> loader resolves CLAUDE.md files from four levels, merged in order of increasing specificity:</p>
+
+<ol>
+  <li><strong>Managed:</strong> <code>/etc/claude/claudemd/</code> — system-wide, admin-controlled</li>
+  <li><strong>User:</strong> <code>~/.claude/CLAUDE.md</code> — personal, cross-project</li>
+  <li><strong>Project:</strong> <code>CLAUDE.md</code> in repo root, plus <code>.claude/CLAUDE.md</code> — team-shared</li>
+  <li><strong>Local:</strong> <code>CLAUDE.local.md</code> — per-developer, gitignored</li>
+</ol>
+
+<p>Higher tiers set policy; lower tiers add specifics. A project CLAUDE.md can't override a managed-level directive, but it can add project-specific instructions.</p>
+
+<h3>MEMORY.md system</h3>
+
+<p>The <code>src/memdir/</code> module manages MEMORY.md files with strict limits: max 200 lines or 25KB, whichever is hit first. It supports an <code>@include</code> directive for splitting large memory into multiple files, and automatically writes memory files when the agent accumulates enough context.</p>
+
+<h3>Session memory</h3>
+
+<p><code>src/services/SessionMemory/sessionMemory.ts</code> maintains auto-generated markdown notes per session. These notes capture what happened during the session — files touched, decisions made, problems encountered — and persist them to disk for later review.</p>
+
+<h3>Memory consolidation</h3>
+
+<p>Consolidation in Claude Code is triggered by token thresholds: at minimum 10,000 tokens to initiate, and at least 5,000 tokens between updates. A forked subagent extracts key information from the conversation — this runs as a separate process so it never blocks the main agent. The consolidation agent is given a focused prompt: extract facts, decisions, and patterns, not raw conversation.</p>
+
+<pre><code>// src/services/SessionMemory/consolidation.ts — thresholds
+const MIN_TOKENS_TO_INIT = 10_000;
+const MIN_TOKENS_BETWEEN_UPDATES = 5_000;
+// Consolidation runs as a forked subagent:
+// spawn(claude, ["--agent", "memory-consolidator", ...])</code></pre>
+
+<h2>Nanobot: File I/O with Consolidator</h2>
+
+<p>Nanobot's memory system is file-based but adds an incremental consolidation mechanism that Claude Code's simpler threshold approach lacks.</p>
+
+<h3>MemoryStore: four files + history</h3>
+
+<p><code>nanobot/agent/memory.py:40</code> defines the <code>MemoryStore</code> with five persistent artifacts:</p>
+
+<pre><code># nanobot/agent/memory.py:40 — MemoryStore
+class MemoryStore:
+  def __init__(self, root_dir: Path):
+    self.memory_md    = root_dir / "MEMORY.md"     # persistent memory
+    self.user_md      = root_dir / "USER.md"       # user preferences
+    self.soul_md      = root_dir / "SOUL.md"       # agent identity
+    self.history_jsonl = root_dir / "history.jsonl" # consolidated log
+    self.cursor        = 0                          # last consolidated position</code></pre>
+
+<p>The <strong>SOUL.md</strong> file is unique among all 7 codebases — it defines the agent's personality and behavioral constraints, separate from factual memory (MEMORY.md) and user preferences (USER.md). This tripartite split (identity, facts, preferences) is a clean separation that other codebases conflate into fewer files.</p>
+
+<h3>Consolidator: incremental LLM summarization</h3>
+
+<p>The <code>Consolidator</code> at <code>memory.py:602</code> does what its name says: it incrementally summarizes old messages into <code>history.jsonl</code>. It uses a <strong>cursor-based</strong> approach — tracking which messages have already been consolidated via the <code>cursor</code> field, so only new messages are processed each run.</p>
+
+<p>The consolidation boundary algorithm picks safe cut points at <strong>user-turn boundaries</strong>. It will never split a conversation in the middle of an agent response — the cut always lands between a user message and the next agent message. This preserves conversational coherence in the summary.</p>
+
+<h3>AutoCompact: idle-session archiving</h3>
+
+<p><code>nanobot/autocompact.py:17</code> provides <code>AutoCompact</code>, a TTL-based archiving mechanism. If a session goes idle beyond a configured duration, AutoCompact triggers consolidation and archives the full transcript. This prevents disk bloat for long-running but infrequently-used agents.</p>
+
+<h3>Git-based versioning</h3>
+
+<p>SOUL.md, USER.md, and MEMORY.md are versioned through a <code>GitStore</code> wrapper. Every change to these files is committed with a descriptive message, giving the user an audit trail of how the agent's memory evolved. The <code>history.jsonl</code> is NOT versioned — it's treated as a cache.</p>
+
+<h2>Codex: SQLite + 2-stage extraction</h2>
+
+<p>Codex uses a relational approach with four separate SQLite databases and a two-stage memory extraction pipeline.</p>
+
+<h3>Four databases</h3>
+
+<p>Codex maintains four SQLite databases, each with a distinct concern:</p>
+
+<ul>
+  <li><strong>State DB:</strong> Runtime state, tool results, conversation metadata</li>
+  <li><strong>Logs DB:</strong> Structured log entries for debugging and observability</li>
+  <li><strong>Goals DB:</strong> Persistent goal tracking across sessions</li>
+  <li><strong>Memories DB:</strong> <code>memories_1.sqlite</code> — the long-term memory store</li>
+</ul>
+
+<h3>2-stage extraction pipeline</h3>
+
+<p><code>codex-rs/state/src/runtime/memories.rs:28</code> implements the <code>MemoryStore</code> with a two-phase extraction pipeline:</p>
+
+<pre><code>// codex-rs/state/src/runtime/memories.rs:28
+// Stage 1: Thread-level extraction — runs per conversation thread
+// Phase 2: Global consolidation — merges across threads, 6-hour cooldown
+pub struct MemoryStore {
+  db: SqlitePool,
+  last_global_consolidation: Instant,  // 6-hour cooldown
+  // ...
+}</code></pre>
+
+<p><strong>Stage 1</strong> extracts memories from a single conversation thread — what was decided, what was learned. This runs frequently, after substantial turns.</p>
+
+<p><strong>Phase 2</strong> performs global consolidation — merging memories from multiple threads into a unified knowledge base. This runs on a 6-hour cooldown to avoid redundant LLM calls. The cooldown is per-process (not persisted), so it resets on restart.</p>
+
+<p>The two-stage design recognizes a key insight: thread-local extraction is cheap and can run often, but cross-thread consolidation is expensive and should be batched.</p>
+
+<h2>Minimal memory: pi-mono, openclaw, and opencode</h2>
+
+<h3>pi-mono: JSONL sessions only</h3>
+
+<p>pi-mono has the simplest memory story of any codebase: JSONL session files. That's it. No MEMORY.md, no consolidation, no skill learning, no background extraction. Each session is written to a <code>.jsonl</code> file for replay, but there is no mechanism for information to cross session boundaries. Why? pi-mono was designed as a research framework where memory is the consumer's responsibility — the framework provides the loop, hooks, and tools, and the app developer decides what to remember.</p>
+
+<h3>openclaw: SDK available, not default</h3>
+
+<p>openclaw ships a <strong>Memory Host SDK</strong> with SQLite storage and optional embeddings for semantic search. However, it is <strong>not used by default</strong>. The SDK is available for consumers who want to wire it in, but the framework itself runs without any long-term memory. This reflects openclaw's design philosophy: provide the capability, don't force the integration.</p>
+
+<h3>opencode: localStorage only</h3>
+
+<p>OpenCode's <code>packages/app/src/utils/persist.ts</code> persists UI state to localStorage — things like panel widths, sort order, and filter preferences. There is no agent memory system at all. The persistence is purely for the human-facing UI, not for the agent's knowledge. This is consistent with OpenCode's positioning as a lightweight coding assistant rather than a persistent agent.</p>
+
+<h2>Comparative table</h2>
+
+<table>
+  <tr><th>Dimension</th><th>hermes-agent</th><th>claude-code</th><th>nanobot</th><th>codex</th><th>pi-mono</th><th>openclaw</th><th>opencode</th></tr>
+  <tr>
+    <td><strong>Working memory</strong></td>
+    <td>Injected system prompt block</td>
+    <td>4-tier CLAUDE.md merge</td>
+    <td>MEMORY.md + USER.md + SOUL.md</td>
+    <td>In-context goal state</td>
+    <td>None (array of messages)</td>
+    <td>None (array of messages)</td>
+    <td>None (chat only)</td>
+  </tr>
+  <tr>
+    <td><strong>Short-term</strong></td>
+    <td>Session turn history</td>
+    <td>Session markdown notes</td>
+    <td>history.jsonl (cursor-based)</td>
+    <td>State DB + Logs DB</td>
+    <td>JSONL session dump</td>
+    <td>JSONL session dump</td>
+    <td>None</td>
+  </tr>
+  <tr>
+    <td><strong>Long-term</strong></td>
+    <td>SQLite FTS5 + MEMORY.md files</td>
+    <td>MEMORY.md (~/.claude/memdir)</td>
+    <td>MEMORY.md + SOUL.md (Git-backed)</td>
+    <td>memories_1.sqlite</td>
+    <td>None</td>
+    <td>Optional SDK (SQLite + embeddings)</td>
+    <td>None</td>
+  </tr>
+  <tr>
+    <td><strong>Consolidation</strong></td>
+    <td>Background daemon thread, per-turn</td>
+    <td>Forked subagent, threshold-gated</td>
+    <td>Incremental LLM summarization</td>
+    <td>2-stage: thread + global (6h cooldown)</td>
+    <td>None</td>
+    <td>Not by default</td>
+    <td>None</td>
+  </tr>
+  <tr>
+    <td><strong>Skill creation</strong></td>
+    <td>Background review + curator lifecycle</td>
+    <td>None (user-managed)</td>
+    <td>None (user-managed)</td>
+    <td>Goal tracking (goals DB)</td>
+    <td>None</td>
+    <td>None</td>
+    <td>None</td>
+  </tr>
+  <tr>
+    <td><strong>Search</strong></td>
+    <td>FTS5 + CJK trigram</td>
+    <td>File glob + grep</td>
+    <td>Cursor-based incremental</td>
+    <td>SQL queries</td>
+    <td>None</td>
+    <td>Embeddings (optional)</td>
+    <td>None</td>
+  </tr>
+  <tr>
+    <td><strong>Unique</strong></td>
+    <td>Cron suggestion proposals</td>
+    <td>4-tier CLAUDE.md merge</td>
+    <td>SOUL.md identity file + Git versioning</td>
+    <td>4-DB separation + cooldown gating</td>
+    <td>Zero-memory design</td>
+    <td>Opt-in SDK architecture</td>
+    <td>UI-only persistence</td>
+  </tr>
+</table>
+
+<h2>Design heuristics</h2>
+
+<div class="callout">
+  <strong>"Memory is only useful if it's retrievable at the right time — prefetch is everything."</strong> Storing memories is the easy part. The hard part is surfacing the right memory in the agent's context window exactly when it's needed. Hermes-agent's prefetch phase, Claude Code's tiered CLAUDE.md loading, and Codex's SQL queries all solve the same problem: retrieval timing.
+</div>
+
+<div class="callout">
+  <strong>"Consolidation should happen in the background, never blocking the main loop."</strong> Every codebase with consolidation (hermes-agent, claude-code, nanobot, codex) runs it asynchronously. Hermes-agent uses a daemon thread. Claude Code forks a subagent process. Codex gates on a 6-hour cooldown. The main agent loop must never wait on a consolidation run — the user's turn time is sacred.
+</div>
+
+<div class="callout">
+  <strong>"User-managed files (MEMORY.md) must be 'reference-only' in context — never treated as active instructions."</strong> Hermes-agent injects memories into a reference block in the system prompt. Claude Code separates CLAUDE.md (instructions) from MEMORY.md (knowledge). The distinction matters: the user writes instructions; the agent writes memories. Conflating them causes the agent to treat its own stale memories as commands.
+</div>
+
+<div class="callout">
+  <strong>"Staleness decays — memory without lifecycle management becomes noise."</strong> Hermes-agent's curator is the only system with explicit lifecycle management: active &rarr; stale (30d) &rarr; archive (90d). Without this, long-lived agents accumulate cruft — old facts, resolved TODOs, and irrelevant context that dilutes the retrieval signal.
+</div>
+
+<div class="callout">
+  <strong>"Safe cut points matter for coherence."</strong> Nanobot's consolidator only splits at user-turn boundaries. Codex separates thread-local from global consolidation. Both recognize that arbitrary truncation produces incoherent summaries. A cut point must respect conversational structure.
+</div>
+
+<h2>Why pi-mono has no memory</h2>
+
+<p>The absence of memory in pi-mono is a design decision, not an omission. pi-mono is a research framework — it provides the agent loop, hooks, and tool interface, and leaves memory to the consumer. This is consistent with the "primitives, not features" philosophy: give developers building blocks, not a prescribed memory architecture.</p>
+
+<p>But there's a real cost: every pi-mono consumer must build their own memory system. If they don't, their agent has no persistent knowledge. This is fine for one-shot coding tasks; it's crippling for long-running agents.</p>
+
+<h2>Exercise: Classify the memory system</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>Quiz</h3>
+
+  <div class="question">Q1. Which codebase implements a skill curator that auto-transitions skills from active to stale to archive based on usage age?</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">claude-code</div>
+    <div class="option" data-q="1" data-a="b">nanobot</div>
+    <div class="option" data-q="1" data-a="c">hermes-agent</div>
+    <div class="option" data-q="1" data-a="d">codex</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. What are the three phases of hermes-agent's MemoryManager pipeline?</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">store, query, delete</div>
+    <div class="option" data-q="2" data-a="b">prefetch, inject, sync</div>
+    <div class="option" data-q="2" data-a="c">load, merge, persist</div>
+    <div class="option" data-q="2" data-a="d">extract, summarize, archive</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. What is the minimum token threshold for Claude Code to initiate memory consolidation?</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">5,000 tokens</div>
+    <div class="option" data-q="3" data-a="b">20,000 tokens</div>
+    <div class="option" data-q="3" data-a="c">10,000 tokens</div>
+    <div class="option" data-q="3" data-a="d">50,000 tokens</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+
+  <div class="question">Q4. Which codebase is unique in having a SOUL.md file that separates agent identity from factual memory and user preferences?</div>
+  <div class="options">
+    <div class="option" data-q="4" data-a="a">hermes-agent</div>
+    <div class="option" data-q="4" data-a="b">claude-code</div>
+    <div class="option" data-q="4" data-a="c">nanobot</div>
+    <div class="option" data-q="4" data-a="d">codex</div>
+  </div>
+  <div class="feedback" id="feedback4"></div>
+
+  <div class="question">Q5. How does Codex prevent redundant global consolidation runs?</div>
+  <div class="options">
+    <div class="option" data-q="5" data-a="a">Token count threshold</div>
+    <div class="option" data-q="5" data-a="b">File modification timestamp</div>
+    <div class="option" data-q="5" data-a="c">6-hour cooldown</div>
+    <div class="option" data-q="5" data-a="d">Manual trigger only</div>
+  </div>
+  <div class="feedback" id="feedback5"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'c', 2: 'b', 3: 'c', 4: 'c', 5: 'c' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ Correct.';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ Not quite — re-read the relevant section above.';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>What we haven't covered</h2>
+<ul>
+  <li><strong>Vector embeddings for semantic memory search</strong> — openclaw's optional SDK supports this, but it's not used by default. Semantic search over memories is a growing area but only openclaw ships the capability.</li>
+  <li><strong>Memory across multi-agent systems</strong> — how memories are shared or partitioned when multiple agents collaborate. Covered in <a href="0008-multi-agent.html">Lesson 0008</a>.</li>
+  <li><strong>Memory eviction from context</strong> — once a memory is injected into working memory, when does it get removed? Covered in <a href="0003-context-management.html">Lesson 0003</a>.</li>
+</ul>
+
+<h2>Primary sources</h2>
+<ol>
+  <li><strong>hermes-agent</strong>: <code>agent/memory_manager.py:252</code> (MemoryManager), <code>hermes_state.py</code> (SQLite + FTS5), <code>agent/background_review.py</code> (daemon review), <code>agent/curator.py</code> (skill lifecycle), <code>cron/suggestions.py</code> (cron proposals)</li>
+  <li><strong>claude-code</strong>: <code>src/utils/claudemd.ts</code> (4-tier CLAUDE.md loader), <code>src/memdir/</code> (MEMORY.md system), <code>src/services/SessionMemory/sessionMemory.ts</code> (session notes), consolidation subagent (forked process, threshold-gated)</li>
+  <li><strong>nanobot</strong>: <code>nanobot/agent/memory.py:40</code> (MemoryStore), <code>:602</code> (Consolidator), <code>nanobot/autocompact.py:17</code> (AutoCompact), GitStore (SOUL.md, USER.md, MEMORY.md versioning)</li>
+  <li><strong>codex</strong>: <code>codex-rs/state/src/runtime/memories.rs:28</code> (MemoryStore), 4 SQLite databases (state, logs, goals, memories_1.sqlite), 2-stage extraction (thread + global, 6h cooldown)</li>
+  <li><strong>pi-mono</strong>: JSONL session files only — no MEMORY.md, no consolidation, no skill learning, no cross-session memory</li>
+  <li><strong>openclaw</strong>: Memory Host SDK (SQLite + optional embeddings) — available but not used by default</li>
+  <li><strong>opencode</strong>: <code>packages/app/src/utils/persist.ts</code> — localStorage for UI state only, no agent memory system</li>
+</ol>
+
+<h2>Recommended next reading</h2>
+<ul>
+  <li>If you want the <strong>most sophisticated</strong> memory system: trace <code>hermes-agent/agent/memory_manager.py</code> and <code>hermes_state.py</code> — the prefetch-inject-sync pipeline with FTS5 is the gold standard.</li>
+  <li>If you want the <strong>most practical</strong> pattern: read <code>nanobot/nanobot/agent/memory.py</code> — the Consolidator with cursor-based incremental summarization is clean, testable, and easy to adopt.</li>
+  <li>If you want the <strong>simplest that works</strong>: study Claude Code's <code>src/memdir/</code> — file-based MEMORY.md with @include directives and size limits is minimal and battle-tested.</li>
+</ul>
+
+<div class="callout">
+  <strong>Ask followup questions.</strong> If anything in this lesson is unclear, or you want to go deeper on a specific codebase's memory system, ask your agent teacher. The codebases are all cloned and indexed at <code>/home/shared/agent-study/repos/</code>.
+</div>
+
+<div class="nav">
+  <span><a href="0004-permission-model.html">&larr; Lesson 0004: Permission Model</a></span>
+  <span><a href="0006-rendering-pipeline.html">Lesson 0006: Rendering Pipeline &rarr;</a></span>
+</div>
+
+<script src="../assets/lang-switcher.js"></script>
+</body>
+</html>

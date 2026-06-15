@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0002: Tool System — define, register, dispatch, normalize</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  .spectrum { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0; padding: 0.8rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.82rem; }
+  .spectrum .left { font-weight: 600; }
+  .spectrum .right { font-weight: 600; }
+  .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="#" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>Lesson 0002: Tool System</h1>
+<p class="subtitle">Define, register, dispatch, normalize — the four stages every agent tool passes through.</p>
+<p class="meta">June 2026 · 7 primary source codebases · <a href="0002-tool-system.html">Permalink</a></p>
+
+<p class="sidenote">Every tool in every agent goes through exactly four stages: it must be <strong>defined</strong> (so the LLM knows its schema), <strong>registered</strong> (so the harness can find it), <strong>dispatched</strong> (so it actually runs), and <strong>normalized</strong> (so results feed back into the conversation). The differences between codebases are all in <em>how</em> they implement these four stages.</p>
+
+<p>In <a href="0001-core-agent-loop.html">Lesson 0001</a>, we saw that every agent is built around a loop. This lesson zooms into the inner engine of that loop: <em>how tools work</em>. We'll trace all four stages across all seven codebases, and identify the three fundamental design philosophies that divide them.</p>
+
+<h2>The four stages</h2>
+
+<p>Every tool interaction follows this pipeline:</p>
+
+<div class="diagram">
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   DEFINE     │ →  │  REGISTER    │ →  │  DISPATCH    │ →  │  NORMALIZE   │
+│              │    │              │    │              │    │              │
+│ Schema,      │    │ Registry,    │    │ Execute,     │    │ Result →     │
+│ params,      │    │ discovery,   │    │ sandbox,     │    │ LLM-ready    │
+│ description  │    │ availability │    │ permissions  │    │ message      │
+└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+</div>
+
+<h2>Three design philosophies</h2>
+
+<p>Across the seven codebases, three distinct philosophies emerge:</p>
+
+<div class="spectrum">
+  <span class="left">Maximally minimal</span>
+  <span class="bar"></span>
+  <span class="right">Fully orchestrated</span>
+</div>
+
+<ol>
+  <li><strong>Minimalist:</strong> pi-mono, openclaw, nanobot. Tools are simple objects with an execute function. No central registry or discovery machinery — tools live in arrays or dicts. The framework doesn't even ship with built-in tools; tools are provided by the consumer.</li>
+  <li><strong>Type-safe / DI:</strong> opencode (Effect-TS). Tools are defined with runtime-validated schemas, registered via dependency injection into scoped containers, and dispatched with automatic cleanup. The type system guarantees correctness.</li>
+  <li><strong>Fully orchestrated:</strong> claude-code, codex, hermes-agent. Tools go through a multi-stage pipeline: permission checks, sandbox selection, execution, retry, result normalization, and (for claude-code) UI rendering. Each stage is a separate concern with pluggable implementations.</li>
+</ol>
+
+<h2>Stage 1: Define — how tools describe themselves</h2>
+
+<h3>Schema-first (pi-mono, openclaw)</h3>
+
+<p>Tools implement the <code>AgentTool&lt;TParameters&gt;</code> interface, which extends a generic <code>Tool</code> with a <code>label</code>, <code>execute()</code>, and <code>executionMode</code>. The schema is declared as a TypeScript generic — the type <em>is</em> the schema. No runtime schema validation beyond what the tool's own <code>execute()</code> does internally.</p>
+
+<pre><code>// pi-mono: packages/agent/src/types.ts:365
+export interface AgentTool&lt;TParameters = any, TDetails = any&gt;
+  extends Omit&lt;Tool&lt;TParameters&gt;, 'execute'&gt; {
+  label: string;
+  execute(toolCall, context, options?): Promise&lt;AgentToolResult&lt;TDetails&gt;&gt;;
+  executionMode: 'sequential' | 'parallel';
+}
+
+// openclaw: packages/agent-core/src/types.ts:438 — identical structure
+export interface AgentTool&lt;TParameters = any, TDetails = any&gt;
+  extends Omit&lt;Tool&lt;TParameters&gt;, 'execute'&gt; {
+  label: string;
+  execute(toolCall, context, options?): Promise&lt;AgentToolResult&lt;TDetails&gt;&gt;;
+  executionMode: 'sequential' | 'parallel';
+}</code></pre>
+
+<h3>Zod-typed objects (claude-code)</h3>
+
+<p>Claude Code tools are objects implementing the <code>Tool&lt;Input, Output&gt;</code> interface, with Zod schemas for <code>inputSchema</code> and <code>outputSchema</code>. The <code>buildTool()</code> factory fills in safe defaults for 7 lifecycle methods.</p>
+
+<pre><code>// claude-code: src/Tool.ts:783
+buildTool({
+  name: ToolNames.BASH,
+  description: 'Execute a bash command',
+  inputSchema: BashInputSchema,  // Zod schema
+  async *call(input, context) { /* ... */ },
+  // buildTool provides defaults for:
+  // isConcurrencySafe, isReadOnly, isEnabled,
+  // checkPermissions, validateInput,
+  // renderToolUseMessage, renderToolResultMessage
+})</code></pre>
+
+<h3>JSON Schema dicts (hermes-agent, nanobot)</h3>
+
+<p>Both Python codebases use JSON Schema dicts. Hermes-agent's <code>ToolEntry</code> stores a <code>schema</code> dict; nanobot's <code>Tool</code> ABC has a <code>parameters</code> property returning a JSON Schema dict. The difference: nanobot uses a Python ABC with <code>@tool_parameters</code> decorator for declarative schema attachment, while hermes-agent passes the schema dict directly to <code>registry.register()</code>.</p>
+
+<pre><code># hermes-agent: tools/registry.py:77
+class ToolEntry:
+  name: str
+  toolset: str
+  schema: dict            # OpenAI-format JSON Schema
+  handler: Callable       # sync or async
+  check_fn: Callable | None  # availability gate
+
+# nanobot: nanobot/agent/tools/base.py:124
+class Tool(ABC):
+  name: str
+  description: str
+  parameters: dict        # JSON Schema
+  async def execute(self, **kwargs): ...
+
+  @tool_parameters(StringParam("query", "..."))
+  async def search(self, query: str): ...</code></pre>
+
+<h3>Rust trait-based (codex)</h3>
+
+<p>Codex uses Rust traits: <code>CoreToolRuntime</code> for tool handlers, <code>ToolOutput</code> for results, <code>ToolSpec</code> for schema definition. The type system enforces correctness at compile time.</p>
+
+<pre><code>// codex: codex-rs/core/src/tools/registry.rs:47
+pub trait CoreToolRuntime: Send + Sync {
+  fn apply_patch(&self, input) -> ...;
+  fn shell(&self, input) -> ...;
+  fn exec(&self, input) -> ...;
+  fn mcp_dynamic_tool(&self, input) -> ...;
+  fn view_image(&self, input) -> ...;
+  // ... 30+ methods, one per tool handler
+}</code></pre>
+
+<table>
+  <tr><th>Codebase</th><th>Definition Format</th><th>Schema Validation</th></tr>
+  <tr><td>pi-mono / openclaw</td><td>TypeScript generic interface</td><td>Tool-level (manual)</td></tr>
+  <tr><td>claude-code</td><td>Zod-typed objects</td><td>Zod parse on input</td></tr>
+  <tr><td>hermes-agent</td><td>OpenAI-format JSON Schema dict</td><td>Schema passed to LLM API</td></tr>
+  <tr><td>nanobot</td><td>JSON Schema + ABC</td><td>JSON Schema validate in prepare_call()</td></tr>
+  <tr><td>codex</td><td>Rust trait + ToolSpec</td><td>Compile-time + serde</td></tr>
+  <tr><td>opencode</td><td>Effect Schema</td><td>Schema.decodeUnknownEffect</td></tr>
+</table>
+
+<h2>Stage 2: Register — how tools are discovered</h2>
+
+<p>The registration strategy correlates strongly with language and framework choice:</p>
+
+<p><strong>No registry (pi-mono, openclaw):</strong> Tools are passed as an <code>AgentTool[]</code> array on <code>AgentContext</code>. The consumer owns tool lifecycle entirely. This is the simplest possible approach — and the most flexible, since there's no framework to fight.</p>
+
+<p class="sidenote">pi-mono's approach: "primitives, not features." The framework provides zero built-in tools. The four tools (read, write, edit, bash) are defined at the application layer, not in the framework.</p>
+
+<p><strong>Flat array with conditional inclusion (claude-code):</strong> <code>getAllBaseTools()</code> in <code>src/tools.ts:193</code> returns a flat array of 30+ tools. Tools are conditionally included based on feature flags (<code>REPLTool</code>, <code>WebBrowserTool</code>) and permission context. MCP tools are merged in via <code>assembleToolPool()</code> (line 345) with deduplication.</p>
+
+<p><strong>Singleton registry with AST discovery (hermes-agent):</strong> The <code>ToolRegistry</code> singleton in <code>tools/registry.py:151</code> stores all tools. Discovery in <code>discover_builtin_tools()</code> (line 57) scans <code>tools/*.py</code> with the <code>ast</code> module — it parses Python source to find <code>registry.register(...)</code> calls <em>before</em> importing the module. This avoids side effects from importing tools that require unavailable dependencies (Docker, Playwright, etc.).</p>
+
+<p><strong>Package scanning (nanobot):</strong> <code>ToolLoader</code> in <code>nanobot/agent/tools/loader.py:21</code> uses <code>pkgutil.iter_modules</code> to discover <code>Tool</code> subclasses, plus <code>entry_points(group="nanobot.tools")</code> for plugin discovery. The <code>_plugin_discoverable</code> class attribute prevents abstract base classes from being auto-discovered.</p>
+
+<p><strong>Per-turn build (codex):</strong> <code>build_tool_router()</code> in <code>spec_plan.rs</code> constructs the <code>ToolRouter</code> fresh each turn. It incorporates MCP tools, dynamic tools (discovered at runtime), extension tools, and standard tools. The router maps <code>ToolName</code> → <code>ToolRegistry</code> entry.</p>
+
+<p><strong>DI + Scope (opencode):</strong> <code>ToolRegistry.Service</code> in <code>registry.ts</code> uses Effect's <code>Layer</code>/<code>Scope</code> for dependency injection. Tools are registered into a scoped container and automatically cleaned up when the scope exits. The <code>materialize()</code> method snapshots definitions for the LLM.</p>
+
+<h2>Stage 3: Dispatch — how tools are executed</h2>
+
+<h3>Execution timing</h3>
+
+<p>As covered in Lesson 0001, two camps:</p>
+<ul>
+  <li><strong>Batch (after stream):</strong> pi-mono, openclaw, nanobot, hermes-agent — wait for LLM stream to complete, collect tool calls, execute together</li>
+  <li><strong>Streaming (during stream):</strong> claude-code — <code>StreamingToolExecutor</code> executes tools as the LLM emits them</li>
+  <li><strong>Hybrid:</strong> codex — <code>FuturesOrdered</code> drains in-flight tool futures during streaming; opencode — configurable</li>
+</ul>
+
+<h3>Concurrency model</h3>
+
+<p>Every codebase has a concept of which tools can run together:</p>
+
+<table>
+  <tr><th>Codebase</th><th>Concurrency Model</th><th>Implementation</th></tr>
+  <tr><td>pi-mono</td><td>Sequential or Parallel (Promise.all)</td><td><code>executeToolCallsSequential</code> / <code>executeToolCallsParallel</code></td></tr>
+  <tr><td>openclaw</td><td>Sequential or Parallel (Promise.all)</td><td>Same pattern as pi-mono, <code>executionMode</code> per tool</td></tr>
+  <tr><td>claude-code</td><td>Concurrent-safe tools parallel, others serial</td><td><code>StreamingToolExecutor</code> partitions by <code>isConcurrencySafe()</code></td></tr>
+  <tr><td>hermes-agent</td><td>Sequential (sync context + async bridge)</td><td><code>_run_async()</code> handles coroutines with per-thread event loops</td></tr>
+  <tr><td>nanobot</td><td>Sequential with <code>concurrency_safe</code> flag</td><td><code>Tool.concurrency_safe</code> / <code>Tool.exclusive</code> properties</td></tr>
+  <tr><td>codex</td><td>Parallel via Tokio + FuturesOrdered</td><td><code>tool_supports_parallel()</code> gates concurrent execution</td></tr>
+  <tr><td>opencode</td><td>Sequential settling via Effect fiber</td><td>Each <code>settle()</code> call is its own Effect</td></tr>
+</table>
+
+<h3>Sandboxing</h3>
+
+<p>Only one codebase has a serious sandboxing story:</p>
+
+<p><strong>codex:</strong> The <code>ToolOrchestrator</code> (orchestrator.rs) provides a multi-layered sandbox: Landlock (Linux), Windows sandbox, macOS sandbox, elevated/restricted token. On sandbox denial, the orchestrator can <em>retry with escalated sandboxing</em> — if a restricted sandbox blocks a file write, the tool can be retried with the elevated sandbox. Network access approval is a first-class concept with immediate and deferred modes.</p>
+
+<p>All other codebases delegate sandboxing to external mechanisms: pi-mono/openclaw use <code>beforeToolCall</code> hooks, hermes-agent uses environment-based terminals, claude-code uses permission checks on tool access (not execution sandboxing).</p>
+
+<h2>Stage 4: Normalize — how results feed back</h2>
+
+<p>After execution, tool results must become messages the LLM can consume. This is where the most divergence occurs:</p>
+
+<p><strong>Size truncation (all):</strong> Every codebase has a maximum result size. Claude Code's <code>applyToolResultBudget()</code> persists large results to disk and replaces them with truncated previews. Hermes-agent's <code>max_result_size_chars</code> truncates per-tool. Nanobot exempts <code>read_file</code> from offloading to prevent persist-to-disk → read-from-disk loops.</p>
+
+<p><strong>Error normalization (all):</strong> All codebases catch tool exceptions and convert them to error messages that the LLM can understand. Hermes-agent and nanobot return <code>{"error": "..."}</code> JSON strings. pi-mono/openclaw create <code>ToolResultMessage</code> objects with <code>isError: true</code>. Codex uses <code>FunctionCallError</code> variants.</p>
+
+<p><strong>Progress streaming (pi-mono, openclaw):</strong> The <code>AgentToolResult</code> can include a <code>progress</code> callback for partial streaming, allowing the UI to show incremental tool output before completion. OpenClaw added this on top of the pi-mono base.</p>
+
+<p><strong>Per-tool rendering (claude-code):</strong> Uniquely, Claude Code tools have 7+ rendering methods (<code>renderToolUseMessage</code>, <code>renderToolResultMessage</code>, <code>renderToolUseProgressMessage</code>, etc.) — the tool result is not just a message for the LLM, but a UI artifact for the TUI.</p>
+
+<h2>Comparative table</h2>
+
+<table>
+  <tr><th>Dimension</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th></tr>
+  <tr><td><strong>Tool count</strong></td><td>4 (app-defined)</td><td>N/A (framework)</td><td>30+</td><td>80+</td><td>~20</td><td>30+ handlers</td><td>~15</td></tr>
+  <tr><td><strong>Definition</strong></td><td>TS generic</td><td>TS generic</td><td>Zod object</td><td>JSON Schema dict</td><td>ABC + JSON Schema</td><td>Rust trait</td><td>Effect Schema</td></tr>
+  <tr><td><strong>Registry</strong></td><td>None (array)</td><td>None (array)</td><td>Flat array</td><td>Singleton + AST</td><td>Dict + pkgutil</td><td>Trait + per-turn</td><td>WeakMap + DI</td></tr>
+  <tr><td><strong>Discovery</strong></td><td>Consumer provides</td><td>Consumer provides</td><td>Feature flags</td><td>AST scan + MCP</td><td>pkgutil + plugins</td><td>Build per turn</td><td>Scope-based</td></tr>
+  <tr><td><strong>Sandboxing</strong></td><td>None (hooks)</td><td>None (hooks)</td><td>None (perms)</td><td>None (env)</td><td>None</td><td>Multi-layer + retry</td><td>None</td></tr>
+  <tr><td><strong>Concurrency</strong></td><td>Seq/Par</td><td>Seq/Par</td><td>Partitioned</td><td>Seq + async bridge</td><td>Seq + flags</td><td>Tokio parallel</td><td>Seq (Effect)</td></tr>
+  <tr><td><strong>Result handling</strong></td><td>ToolResultMessage</td><td>ToolResultMessage + progress</td><td>7+ render methods + offloading</td><td>JSON string</td><td>Raw + error string</td><td>ToolOutput trait</td><td>Schema-encoded</td></tr>
+  <tr><td><strong>Unique</strong></td><td>Hook lifecycle</td><td>Progress streaming</td><td>Per-tool UI rendering</td><td>Toolsets + TTL cache</td><td>Plugin discovery</td><td>Sandbox escalation</td><td>Scope cleanup</td></tr>
+</table>
+
+<h2>The fundamental tradeoff: complexity budget</h2>
+
+<p>The tool system is where the codebases diverge most dramatically. pi-mono has zero lines of tool registry code. Codex has an entire <code>ToolOrchestrator</code> with approval, sandbox selection, and retry escalation. Why?</p>
+
+<p><strong>More tool infrastructure = more safety guarantees, but more code to maintain.</strong> Codex's sandbox retry logic means a tool that fails due to permission denial in the restricted sandbox can automatically retry with elevated permissions — the user doesn't need to re-run. But it also means a multi-stage pipeline with 10+ files just for tool orchestration.</p>
+
+<p><strong>Less tool infrastructure = more flexibility, but more burden on the consumer.</strong> pi-mono gives you <code>AgentTool[]</code> and says "go." You can implement any tool system you want. But you also <em>have to</em> — the framework won't help you with permission checks, sandboxing, result normalization, or error recovery.</p>
+
+<div class="callout">
+  <strong>Design heuristic:</strong> If you control the execution environment and trust your tools, start minimalist — an array of objects with an execute function. If you need sandbox isolation, permission gating, and observability, the orchestrated approach (codex, claude-code) pays off — but expect the tool system to become <em>the</em> largest subsystem in your codebase.
+</div>
+
+<h2>Exercise: Classify the tool system</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>Quiz</h3>
+
+  <div class="question">Q1. Which codebase uses AST-based source code parsing to discover tools before importing them?</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">nanobot</div>
+    <div class="option" data-q="1" data-a="b">codex</div>
+    <div class="option" data-q="1" data-a="c">hermes-agent</div>
+    <div class="option" data-q="1" data-a="d">opencode</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. Which codebase is the ONLY one with multi-layered sandboxing that supports retry with escalated privileges?</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">claude-code</div>
+    <div class="option" data-q="2" data-a="b">codex</div>
+    <div class="option" data-q="2" data-a="c">opencode</div>
+    <div class="option" data-q="2" data-a="d">hermes-agent</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. What is the "toolset" system in hermes-agent primarily used for?</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">Sandbox tool execution</div>
+    <div class="option" data-q="3" data-a="b">Group tools for selection</div>
+    <div class="option" data-q="3" data-a="c">Define tool schemas</div>
+    <div class="option" data-q="3" data-a="d">Normalize tool results</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'c', 2: 'b', 3: 'b' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ Correct.';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ Not quite — re-read the relevant section above.';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>What we haven't covered</h2>
+<ul>
+  <li><strong>MCP (Model Context Protocol) integration</strong> — how external tools are discovered and integrated (<a href="0002-tool-system.html">covered here</a> for hermes-agent, claude-code, codex)</li>
+  <li><strong>Tool output rendering for UIs</strong> — covered in <a href="0007-ui-transport.html">Lesson 0007</a></li>
+  <li><strong>Permission checks within tool dispatch</strong> — covered in <a href="0004-permission-model.html">Lesson 0004</a></li>
+</ul>
+
+<h2>Primary sources</h2>
+<ol>
+  <li><strong>pi-mono</strong>: <code>packages/agent/src/types.ts:365</code> (AgentTool), <code>agent-loop.ts:373</code> (executeToolCalls)</li>
+  <li><strong>openclaw</strong>: <code>packages/agent-core/src/types.ts:438</code> (AgentTool), <code>agent-loop.ts:258</code> (runLoop)</li>
+  <li><strong>claude-code</strong>: <code>src/Tool.ts:362</code> (Tool interface), <code>src/tools.ts:193</code> (getAllBaseTools), <code>src/services/tools/StreamingToolExecutor.ts</code></li>
+  <li><strong>hermes-agent</strong>: <code>tools/registry.py:77</code> (ToolEntry), <code>:151</code> (ToolRegistry), <code>:57</code> (discover_builtin_tools), <code>toolsets.py</code> (toolset system)</li>
+  <li><strong>nanobot</strong>: <code>nanobot/agent/tools/base.py:124</code> (Tool ABC), <code>registry.py:9</code> (ToolRegistry), <code>loader.py:21</code> (ToolLoader)</li>
+  <li><strong>codex</strong>: <code>codex-rs/core/src/tools/registry.rs:47</code> (CoreToolRuntime), <code>orchestrator.rs</code> (ToolOrchestrator)</li>
+  <li><strong>opencode</strong>: <code>packages/core/src/tool/tool.ts:20</code> (Tool.make), <code>registry.ts</code> (ToolRegistry)</li>
+</ol>
+
+<h2>Recommended next reading</h2>
+<ul>
+  <li>If you want the <strong>most sophisticated</strong> tool system: trace <code>codex/codex-rs/core/src/tools/orchestrator.rs</code> — the approval → sandbox → execute → retry pipeline.</li>
+  <li>If you want the <strong>most unique</strong> discovery mechanism: read <code>hermes-agent/tools/registry.py</code> — the AST-based tool scanning is unlike anything in the other 6 codebases.</li>
+  <li>If you want the <strong>most practical</strong> pattern: <code>codex/codex-rs/core/src/tools/router.rs</code> — building a fresh router per turn with tool search is a clean, testable pattern.</li>
+</ul>
+
+<div class="callout">
+  <strong>Ask followup questions.</strong> If anything in this lesson is unclear, or you want to go deeper on a specific codebase's tool system, ask your agent teacher. The codebases are all cloned and indexed at <code>/home/shared/agent-study/repos/</code>.
+</div>
+
+<div class="nav">
+  <span><a href="0001-core-agent-loop.html">&larr; Lesson 0001: Core Loop</a></span>
+  <span><a href="0003-context-management.html">Lesson 0003: Context Management &rarr;</a></span>
+</div>
+
+<script src="../assets/lang-switcher.js"></script>
+</body>
+</html>

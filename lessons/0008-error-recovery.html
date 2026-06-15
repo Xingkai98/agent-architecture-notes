@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0008: Error Recovery — resilience patterns across AI agent codebases</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  .spectrum { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0; padding: 0.8rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.82rem; }
+  .spectrum .left { font-weight: 600; }
+  .spectrum .right { font-weight: 600; }
+  .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="#" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>Lesson 0008: Error Recovery</h1>
+<p class="subtitle">From crash to continuation — how 7 agent codebases classify, recover from, and survive failure.</p>
+<p class="meta">June 2026 · 7 primary source codebases · <a href="0008-error-recovery.html">Permalink</a></p>
+
+<p class="sidenote">Every agent loop will encounter errors. The difference between a brittle agent and a resilient one is <strong>not</strong> whether errors occur — it's whether the agent can see the error, classify it, choose a recovery strategy, and continue without losing state. This lesson traces the full recovery pipeline across all 7 codebases.</p>
+
+<p>In <a href="0002-tool-system.html">Lesson 0002</a>, we saw tools as the engine of the agent loop. In <a href="0003-context-management.html">Lesson 0003</a>, we saw how context is the loop's memory. This lesson covers what happens when the loop <em>breaks</em> — and how each codebase picks it back up.</p>
+
+<h2>Error categories</h2>
+
+<p>Every agent error falls into one of five categories. Each codebase handles them differently, but the categories are universal:</p>
+
+<div class="diagram">
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│   API ERRORS    │  │ CONTEXT OVERFLOW│  │   MALFORMED     │  │  TOOL FAILURES  │  │    ABORTS       │
+│                 │  │                 │  │   RESPONSES     │  │                 │  │                 │
+│ 401, 429, 5xx,  │  │ Prompt too long,│  │  JSON parse     │  │  Timeout,       │  │  User cancel,   │
+│ timeout,        │  │ token budget    │  │  failure,       │  │  non-zero exit, │  │  hook veto,     │
+│ connection error │  │ exceeded       │  │  stream break   │  │  sandbox deny   │  │  max turns      │
+└─────────────────┘  └─────────────────┘  └─────────────────┘  └─────────────────┘  └─────────────────┘
+</div>
+
+<h2>Two poles of recovery philosophy</h2>
+
+<p>Across the seven codebases, two poles emerge:</p>
+
+<div class="spectrum">
+  <span class="left">Caller-delegated (pi-mono, openclaw)</span>
+  <span class="bar"></span>
+  <span class="right">Full self-recovery (claude-code, hermes-agent)</span>
+</div>
+
+<ol>
+  <li><strong>Caller-delegated:</strong> pi-mono, openclaw. The agent loop stops on error and signals the reason upward. Recovery — retry, restart, model switching — is the caller's responsibility. The framework provides hooks (<code>config.transformContext</code>, <code>config.prepareNextTurn</code>) but no built-in retry logic.</li>
+  <li><strong>Full self-recovery:</strong> claude-code, hermes-agent, nanobot. The agent loop includes retry with exponential backoff, model fallback chains, context compaction on overflow, and checkpoint restore. The loop itself is a state machine with error transitions.</li>
+  <li><strong>Hybrid:</strong> codex, opencode. Some errors are handled internally (SQLite recovery, step limits), others are surfaced to the caller.</li>
+</ol>
+
+<h2>Claude Code: The most complex recovery system</h2>
+
+<p>Claude Code's <code>queryLoop()</code> in <code>src/query.ts:241</code> is a recursive generator that runs the agent turn-by-turn against mutable <code>State</code>. The loop has <strong>12 terminal reasons</strong> (conditions that end the loop) and <strong>7 recovery transitions</strong> (conditions that retry the current turn with modified state).</p>
+
+<h3>The 12 terminal reasons</h3>
+
+<p>Every exit from the loop is documented with a line number. These are not exceptions — they are explicit <code>return</code> statements with a <code>reason</code> discriminator:</p>
+
+<table>
+  <tr><th>Reason</th><th>Line</th><th>Trigger</th></tr>
+  <tr><td><code>blocking_limit</code></td><td>646</td><td>Drain-and-retry count exceeded without successful retry</td></tr>
+  <tr><td><code>image_error</code></td><td>977</td><td>Failed to convert uploaded image to base64</td></tr>
+  <tr><td><code>model_error</code></td><td>996</td><td>API returned an error that could not be retried or fell back</td></tr>
+  <tr><td><code>aborted_streaming</code></td><td>1051</td><td>Stream was aborted mid-response (user interrupt or network drop)</td></tr>
+  <tr><td><code>prompt_too_long</code></td><td>1175</td><td>Context compaction exhausted all strategies and prompt still exceeds limit</td></tr>
+  <tr><td><code>completed</code></td><td>1264</td><td>LLM returned a complete text response with no tool calls</td></tr>
+  <tr><td><code>completed</code></td><td>1357</td><td>All tool calls finished and the assistant message was fully processed</td></tr>
+  <tr><td><code>stop_hook_prevented</code></td><td>1279</td><td>Stop hook returned <code>{allowed: false}</code>, blocking loop exit</td></tr>
+  <tr><td><code>aborted_tools</code></td><td>1515</td><td>User aborted during tool execution</td></tr>
+  <tr><td><code>hook_stopped</code></td><td>1520</td><td>A hook requested the loop stop</td></tr>
+  <tr><td><code>max_turns</code></td><td>1711</td><td>Turn count exceeded <code>MAX_TURNS</code> limit</td></tr>
+</table>
+
+<h3>The 7 recovery transitions</h3>
+
+<p>Before reaching a terminal reason, the loop may take one of 7 recovery paths. Each path modifies <code>State</code> and yields back to the top of the loop for another attempt:</p>
+
+<pre><code>// claude-code: src/query.ts — recovery transitions in queryLoop()
+
+// 1. collapse_drain_retry — after drain-and-collapse, retry the same turn
+// 2. reactive_compact_retry — compaction triggered by overflow, then retry
+// 3. max_output_tokens_escalate — first 'max_tokens' hit → escalate budget
+// 4. max_output_tokens_recovery — subsequent hits → inject recovery message
+// 5. stop_hook_blocking — stop hook said "don't stop", continue the loop
+// 6. token_budget_continuation — exact budget hit, append continuation request
+// 7. next_turn — normal transition: collect results, start next turn</code></pre>
+
+<h3>Max-tokens recovery: a two-phase strategy</h3>
+
+<p>When the model hits its output token limit, Claude Code uses a two-phase escalation:</p>
+
+<pre><code>// Phase 1: Escalate budget from 8K → 64K (ESCALATED_MAX_TOKENS)
+// If it hits again at 64K, Phase 2 kicks in:
+//
+// Phase 2: Inject a recovery message into the conversation
+// "You hit the output token limit. Summarize your progress and continue."
+//
+// This repeats up to 3 times. After the third recovery message,
+// if the limit is still hit, the loop terminates.
+</code></pre>
+
+<h3>Model fallback</h3>
+
+<p>API errors are caught in <code>src/services/api/withRetry.js</code>. When the primary model fails with a retryable error, a <code>FallbackTriggeredError</code> is thrown. The caller catches this and switches to <code>fallbackModel</code> — typically a smaller, faster model that can at least complete the current turn before the user is asked to intervene.</p>
+
+<div class="callout">
+  <strong>Design observation:</strong> Claude Code packs the most recovery logic of any codebase into a single function. The result is a loop where every exit and retry path is visible in one place — no hidden recovery scattered across files. This is intentional: "flatten the loop to see all terminal conditions in one function."
+</div>
+
+<h2>Hermes-agent: Classify-first recovery with 22 failure reasons</h2>
+
+<p>Hermes-agent takes a fundamentally different approach: instead of a flat loop with inline recovery, it uses a dedicated <strong>error classification pipeline</strong> that runs before any recovery decision is made.</p>
+
+<h3>FailoverReason: 22 reasons</h3>
+
+<p><code>agent/error_classifier.py:24</code> defines the <code>FailoverReason</code> enum with 22 members:</p>
+
+<pre><code># hermes-agent: agent/error_classifier.py:24
+class FailoverReason(enum.Enum):
+    AUTH = "auth"
+    BILLING = "billing"
+    RATE_LIMIT = "rate_limit"
+    OVERLOADED = "overloaded"           # 529, 503 with retry-after
+    SERVER_ERROR = "server_error"       # 5xx, not overloaded
+    TIMEOUT = "timeout"
+    CONTEXT_OVERFLOW = "context_overflow"
+    PAYLOAD_TOO_LARGE = "payload_too_large"
+    IMAGE_TOO_LARGE = "image_too_large"
+    MODEL_NOT_FOUND = "model_not_found"
+    TOKEN_LIMIT = "token_limit"
+    BAD_REQUEST = "bad_request"
+    CONTENT_FILTER = "content_filter"
+    TLS = "tls"
+    DNS = "dns"
+    CONNECTION = "connection"
+    # ... 6 more rare reasons</code></pre>
+
+<p>The classification pipeline in <code>classify_api_error()</code> runs through a priority-ordered chain: <strong>provider-specific patterns</strong> (checking the provider's error wrapper) → <strong>HTTP status code</strong> → <strong>error code string</strong> → <strong>message match</strong> → <strong>TLS transient detection</strong> → <strong>transport heuristics</strong>. Each stage can short-circuit the pipeline with a definitive classification.</p>
+
+<h3>TurnRetryState: 14 one-shot recovery guards</h3>
+
+<p><code>agent/turn_retry_state.py:33</code> defines the <code>TurnRetryState</code> dataclass — a collection of 14 boolean flags, each acting as a one-shot guard to prevent infinite retry loops:</p>
+
+<ul>
+  <li><strong>5 auth refresh guards:</strong> <code>refreshed_oauth</code>, <code>refreshed_api_key</code>, <code>rotated_org</code>, <code>switched_project</code>, <code>cleared_token_cache</code></li>
+  <li><strong>6 format/payload guards:</strong> <code>truncated_context</code>, <code>dropped_images</code>, <code>compressed_payload</code>, <code>switched_to_text_only</code>, <code>split_long_message</code>, <code>reduced_tool_count</code></li>
+  <li><strong>2 transport/rate-limit guards:</strong> <code>switched_endpoint</code>, <code>rate_limit_backoff_applied</code></li>
+  <li><strong>2 restart signals:</strong> <code>needs_fresh_turn</code>, <code>needs_model_fallback</code></li>
+</ul>
+
+<p>Each guard is set to <code>True</code> the first time its recovery action is taken. If the same error recurs, the classifier sees the guard already set and escalates to a harder failure (typically model fallback or terminal error).</p>
+
+<h3>Exponential backoff with jitter</h3>
+
+<p><code>agent/retry_utils.py:19</code> implements jittered exponential backoff:</p>
+
+<pre><code># hermes-agent: agent/retry_utils.py:19
+base_delay = 5         # seconds
+max_delay = 120        # 2 minutes cap
+jitter_ratio = 0.5     # ±50% randomization
+
+# Formula: min(base * 2^attempt * (1 ± jitter), max_delay)
+</code></pre>
+
+<h3>Fallback chain</h3>
+
+<p>Hermes-agent maintains an ordered fallback chain on the agent instance: <code>agent._fallback_chain</code> — a list of <code>(provider, model)</code> pairs. When the classifier returns a hard failure reason (model_not_found, billing, content_filter), or when all one-shot guards for a soft failure are exhausted, the agent activates the next entry in the chain and resets <code>retry_count</code> to 0. This means the full recovery budget resets on each fallback step — a fresh model gets a fresh chance.</p>
+
+<h2>Codex: SQLite corruption recovery</h2>
+
+<p>Codex stands apart with a recovery mechanism unique to its architecture: the agent's runtime state is stored in a SQLite database, and SQLite corruption is a real failure mode in long-running agent sessions.</p>
+
+<h3>Backup-and-fresh-start</h3>
+
+<p><code>codex-rs/state/src/runtime/recovery.rs:71</code> implements a clean recovery strategy:</p>
+
+<pre><code>// codex-rs: codex-rs/state/src/runtime/recovery.rs:71
+fn backup_runtime_db_for_fresh_start(corrupt_path: &Path) -> Result<PathBuf> {
+    // 1. Create backup dir: db-backups/sqlite-{timestamp}-{seq}/
+    // 2. Move corrupt DB file into the backup directory
+    // 3. Return the backup path (so the caller can inspect it)
+    // 4. The caller creates a fresh DB at the original path
+    // 5. Previous state is lost, but the corrupt DB is preserved for forensics
+}
+</code></pre>
+
+<p>The detection function, <code>is_sqlite_corruption_error()</code>, walks the error chain (Rust's <code>Error::source()</code>) looking for SQLite error codes <strong>11</strong> (SQLITE_CORRUPT — database disk image is malformed) and <strong>26</strong> (SQLITE_NOTADB — file is not a database). This is a one-shot recovery with no retry — if the fresh DB also corrupts, the agent fails hard.</p>
+
+<h2>Nanobot: Provider retry, length recovery, and checkpoint restore</h2>
+
+<p>Nanobot implements recovery at three distinct layers:</p>
+
+<h3>Provider retry</h3>
+
+<p><code>nanobot/providers/base.py:817</code> — <code>_run_with_retry()</code> has two modes:</p>
+
+<ul>
+  <li><strong>Standard mode:</strong> 3 attempts with delays of 1s, 2s, 4s. For normal API calls.</li>
+  <li><strong>Persistent mode:</strong> Unlimited retries, capped at 60s delay. Used for long-running agent sessions where the user expects the agent to keep trying until the provider recovers.</li>
+</ul>
+
+<h3>Length recovery</h3>
+
+<p><code>nanobot/agent/runner.py:528</code> — when the LLM response has <code>finish_reason == "length"</code> (the model hit its output token limit mid-response):</p>
+
+<pre><code># nanobot/agent/runner.py:528
+# 1. build_length_recovery_message() constructs:
+#    "Your previous response was cut off due to length limits.
+#     Please continue from where you left off."
+# 2. The message is injected as a user turn
+# 3. Max 3 attempts — then the loop terminates
+</code></pre>
+
+<h3>Empty response retry</h3>
+
+<p>Empty LLM responses (content-less with no tool calls) are retried up to 2 times. The retry message explicitly asks the model to produce output.</p>
+
+<h3>Stream stall recovery</h3>
+
+<p>If the streaming connection stalls, the <code>on_stream_recover</code> callback starts a new stream segment from the last received token. The model resumes generating where it left off, rather than the entire turn being discarded.</p>
+
+<h3>Checkpoint restore</h3>
+
+<p><code>nanobot/agent/loop.py:1725</code> — after a crash or restart, the in-flight turn checkpoint is loaded. Any tool calls that were in progress at the time of the crash get <strong>synthetic error results</strong>:</p>
+
+<pre><code># nanobot/agent/loop.py:1725
+# Recovered tool calls → synthetic error:
+# {"error": "Tool call was interrupted by agent restart. The result is unavailable."}
+# The LLM sees these as error tool results and can decide whether to retry or continue.
+</code></pre>
+
+<h2>Opencode: Effect-TS typed errors and step limits</h2>
+
+<p>Opencode uses Effect-TS to encode errors in the type system:</p>
+
+<pre><code>// opencode: packages/core/src/session/runner/index.ts:20
+type RunError =
+  | LLMError               // Provider-level failures
+  | Model.Error            // Model-specific errors
+  | MessageDecodeError     // Failed to parse LLM output
+  | ContextSnapshotDecodeError  // Corrupted context snapshot
+  | StepLimitExceededError // Exceeded MAX_STEPS
+</code></pre>
+
+<h3>Step limit</h3>
+
+<p><code>MAX_STEPS = 25</code>. When the turn count reaches 25, a <code>StepLimitExceededError</code> is raised. This is a hard terminal — no retry, no escalation. The caller must decide what to do.</p>
+
+<h3>Context overflow recovery</h3>
+
+<p><code>compactAfterOverflow()</code> performs a single-shot compaction and retry. If the context still overflows after one compaction, the error propagates upward. No multi-stage escalation like Claude Code's drain-and-collapse pipeline.</p>
+
+<h3>Tool cleanup on error</h3>
+
+<p><code>failUnsettledTools()</code> is called when a provider error occurs mid-turn. Any tool calls that were queued but not yet settled are marked as failed with an error message, ensuring the conversation state remains consistent — the model sees that its tool calls were not executed.</p>
+
+<h2>Pi-mono, OpenClaw: Minimal error handling</h2>
+
+<p>These two TypeScript codebases take the simplest possible approach:</p>
+
+<ul>
+  <li><strong>No built-in retry.</strong> The loop stops when <code>stopReason === "error"</code> or <code>"aborted"</code>.</li>
+  <li><strong>Tool execution errors</strong> are caught in <code>executeToolCalls()</code> and returned as error tool results — the LLM sees a <code>ToolResultMessage</code> with <code>isError: true</code>.</li>
+  <li><strong>Recovery is delegated to the caller</strong> via two config hooks:
+    <ul>
+      <li><code>config.transformContext</code> — allows the caller to modify the context before each turn (e.g., compact, truncate)</li>
+      <li><code>config.prepareNextTurn</code> — called before each turn, the caller can inject recovery messages or switch models</li>
+    </ul>
+  </li>
+</ul>
+
+<p>The philosophy: the framework should not make recovery decisions. The caller knows their use case and their error tolerance. Give them hooks, not policy.</p>
+
+<h2>Comparative table</h2>
+
+<table>
+  <tr><th>Dimension</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th></tr>
+  <tr><td><strong>API retry</strong></td><td>None</td><td>None</td><td>Exponential + fallback model</td><td>Jittered exp (5-120s)</td><td>3 attempts or unlimited</td><td>None (delegated)</td><td>Effect retry</td></tr>
+  <tr><td><strong>Context overflow</strong></td><td>transformContext hook</td><td>transformContext hook</td><td>Drain + collapse + retry (multi-stage)</td><td>Truncation + image drop (6 guards)</td><td>None explicit</td><td>None</td><td>Single-shot compact + retry</td></tr>
+  <tr><td><strong>Model fallback</strong></td><td>None (caller)</td><td>None (caller)</td><td>FallbackTriggeredError → fallbackModel</td><td>Ordered fallback chain (reset count)</td><td>None explicit</td><td>None</td><td>None</td></tr>
+  <tr><td><strong>Tool error recovery</strong></td><td>Error as result</td><td>Error as result</td><td>Error as result + truncation</td><td>Error as result</td><td>Error as result + checkpoint restore</td><td>Sandbox escalate retry</td><td>failUnsettledTools()</td></tr>
+  <tr><td><strong>Error classification</strong></td><td>None</td><td>None</td><td>12 terminal reasons (inline)</td><td>22 FailoverReasons (pipeline)</td><td>finish_reason check</td><td>SQLite error codes</td><td>5-type union</td></tr>
+  <tr><td><strong>Max-tokens recovery</strong></td><td>None</td><td>None</td><td>2-phase: escalate + inject (3x)</td><td>None explicit</td><td>Length recovery msg (3x)</td><td>None</td><td>None</td></tr>
+  <tr><td><strong>State preservation</strong></td><td>None</td><td>None</td><td>Mutable State object</td><td>TurnRetryState (14 flags)</td><td>Checkpoint to disk</td><td>Backup corrupt DB</td><td>Context snapshots</td></tr>
+  <tr><td><strong>Unique</strong></td><td>Caller-owned hooks</td><td>Progress-aware abort</td><td>Flat loop: all exits visible in one function</td><td>One-shot guard matrix</td><td>Stream stall resume</td><td>SQLite forensic backup</td><td>Effect-TS typed union</td></tr>
+</table>
+
+<h2>Design heuristics</h2>
+
+<p>Four principles emerge from studying all 7 codebases:</p>
+
+<div class="callout">
+  <strong>1. Recovery paths should be VISIBLE.</strong> Flatten the loop to see all terminal conditions in one function. Claude Code's <code>queryLoop()</code> is the exemplar — 12 terminal reasons and 7 recovery transitions, all in one file, all with line numbers. When recovery logic is scattered across files (retry in one, compaction in another, fallback in a third), it becomes impossible to reason about the complete state machine.
+</div>
+
+<div class="callout">
+  <strong>2. One-shot guards prevent infinite recovery loops.</strong> Every recovery path needs a flag that prevents it from activating twice for the same error. Hermes-agent's 14 <code>TurnRetryState</code> boolean flags are the clearest implementation of this principle. Claude Code's max-tokens recovery (escalate once, then inject up to 3 times) is another. Without these guards, a persistent error will loop forever.
+</div>
+
+<div class="callout">
+  <strong>3. Tool errors should be LLM-readable.</strong> Format tool failures as messages the model can reason about. Every codebase does this, but nanobot's checkpoint restore takes it furthest: orphaned tool calls get synthetic error messages that explain <em>why</em> the result is unavailable. The model can then decide whether to retry the tool call or work around the missing data.
+</div>
+
+<div class="callout">
+  <strong>4. The more complex the recovery, the flatter the loop should be.</strong> Claude Code has the most recovery paths (7) and the flattest loop (all in <code>queryLoop()</code>). This is not coincidence. When recovery logic is deeply nested or spread across modules, adding a new recovery path risks breaking existing ones. A flat, visible loop makes every transition explicit and every interaction observable.
+</div>
+
+<h2>Exercise: Which recovery strategy?</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>Quiz</h3>
+
+  <div class="question">Q1. Which codebase packs all 12 terminal reasons and 7 recovery transitions into a single recursive generator function?</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">hermes-agent</div>
+    <div class="option" data-q="1" data-a="b">codex</div>
+    <div class="option" data-q="1" data-a="c">claude-code</div>
+    <div class="option" data-q="1" data-a="d">nanobot</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. How many one-shot recovery guards does hermes-agent's TurnRetryState maintain?</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">7</div>
+    <div class="option" data-q="2" data-a="b">12</div>
+    <div class="option" data-q="2" data-a="c">14</div>
+    <div class="option" data-q="2" data-a="d">22</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. Which two SQLite error codes does Codex check for in its corruption detection?</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">1 and 5</div>
+    <div class="option" data-q="3" data-a="b">11 and 26</div>
+    <div class="option" data-q="3" data-a="c">13 and 19</div>
+    <div class="option" data-q="3" data-a="d">7 and 21</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+
+  <div class="question">Q4. What is the key design difference between pi-mono/openclaw and all other codebases in error handling?</div>
+  <div class="options">
+    <div class="option" data-q="4" data-a="a">They use JSON error messages instead of typed errors</div>
+    <div class="option" data-q="4" data-a="b">They have no built-in retry — recovery is delegated to the caller via hooks</div>
+    <div class="option" data-q="4" data-a="c">They retry all errors exactly 3 times</div>
+    <div class="option" data-q="4" data-a="d">They use SQLite for error logging</div>
+  </div>
+  <div class="feedback" id="feedback4"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'c', 2: 'c', 3: 'b', 4: 'b' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ Correct.';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ Not quite — re-read the relevant section above.';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>What we haven't covered</h2>
+<ul>
+  <li><strong>Webhook-level retry and delivery guarantees</strong> — how external integrations recover from agent unavailability (<a href="0005-session-management.html">covered in Lesson 0005</a>)</li>
+  <li><strong>LLM error code taxonomy per provider</strong> — OpenAI vs Anthropic vs Google error code mappings — too granular for an architecture lesson; explore the hermes-agent <code>error_classifier.py</code> directly for per-provider patterns</li>
+  <li><strong>Retry budget and cost implications</strong> — every retry costs tokens; the economics of recovery are covered in <a href="0006-cost-tracking.html">Lesson 0006</a></li>
+</ul>
+
+<h2>Primary sources</h2>
+<ol>
+  <li><strong>claude-code</strong>: <code>src/query.ts:241</code> (queryLoop), <code>:646</code> (blocking_limit), <code>:977</code> (image_error), <code>:996</code> (model_error), <code>:1051</code> (aborted_streaming), <code>:1175</code> (prompt_too_long), <code>:1264,1357</code> (completed), <code>:1279</code> (stop_hook_prevented), <code>:1515</code> (aborted_tools), <code>:1520</code> (hook_stopped), <code>:1711</code> (max_turns); <code>src/services/api/withRetry.js</code> (model fallback)</li>
+  <li><strong>hermes-agent</strong>: <code>agent/error_classifier.py:24</code> (FailoverReason), <code>agent/turn_retry_state.py:33</code> (TurnRetryState), <code>agent/retry_utils.py:19</code> (exponential backoff)</li>
+  <li><strong>codex</strong>: <code>codex-rs/state/src/runtime/recovery.rs:71</code> (backup_runtime_db_for_fresh_start), <code>is_sqlite_corruption_error()</code> (codes 11, 26)</li>
+  <li><strong>nanobot</strong>: <code>nanobot/providers/base.py:817</code> (_run_with_retry), <code>nanobot/agent/runner.py:528</code> (length recovery), <code>nanobot/agent/loop.py:1725</code> (checkpoint restore)</li>
+  <li><strong>opencode</strong>: <code>packages/core/src/session/runner/index.ts:20</code> (RunError), <code>compactAfterOverflow()</code>, <code>failUnsettledTools()</code></li>
+  <li><strong>pi-mono / openclaw</strong>: <code>config.transformContext</code>, <code>config.prepareNextTurn</code> (delegated recovery hooks)</li>
+</ol>
+
+<h2>Recommended next reading</h2>
+<ul>
+  <li>If you want the <strong>most intricate</strong> recovery system: trace <code>claude-code/src/query.ts</code> — start at <code>queryLoop()</code> (line 241) and follow each terminal reason and recovery transition. The entire state machine is in one file.</li>
+  <li>If you want the <strong>most systematic</strong> classification: read <code>hermes-agent/agent/error_classifier.py</code> — the priority-ordered pipeline from provider patterns to transport heuristics is a masterclass in error triage.</li>
+  <li>If you want the <strong>most practical</strong> pattern to adopt: study <code>hermes-agent/agent/turn_retry_state.py</code> — the one-shot guard pattern is simple, testable, and prevents the most common class of bugs in agent recovery (infinite retry loops).</li>
+</ul>
+
+<div class="callout">
+  <strong>Ask followup questions.</strong> If anything in this lesson is unclear, or you want to go deeper on a specific codebase's recovery strategy, ask your agent teacher. The codebases are all cloned and indexed at <code>/home/shared/agent-study/repos/</code>.
+</div>
+
+<div class="nav">
+  <span><a href="0007-ui-transport.html">&larr; Lesson 0007: UI and Transport</a></span>
+  <span><a href="0009-security-patterns.html">Lesson 0009: Security Patterns &rarr;</a></span>
+</div>
+
+<script src="../assets/lang-switcher.js"></script>
+</body>
+</html>

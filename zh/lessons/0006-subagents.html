@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第6课：子智能体 — spawn、isolate、delegate、collect</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  .spectrum { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0; padding: 0.8rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.82rem; }
+  .spectrum .left { font-weight: 600; }
+  .spectrum .right { font-weight: 600; }
+  .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #6f42c1, #0366d6, #28a745, #dc3545); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="../../lessons/0006-subagents.html" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>第6课：子智能体与任务委派</h1>
+<p class="subtitle">spawn、isolate、delegate、collect —— 每个多 agent 系统的四个动作。</p>
+<p class="meta">2026年6月 · 8 个主要源代码库 · <a href="0006-subagents.html">固定链接</a></p>
+
+<p class="sidenote">每个 sub-agent 系统都回答同样的四个问题：<strong>如何</strong> spawn 子级、<strong>能看到</strong>什么、<strong>能花多少</strong>资源、以及结果<strong>如何</strong>流回父级。各代码库之间的区别全部在于在<em>何处</em>划定隔离边界以及<em>如何</em>强制执行它。</p>
+
+<p>在<a href="0002-tool-system.html">第2课</a>中，我们看到工具是 agent 循环的引擎。本课将视角上移一层：<em>当一个 agent 变成多个时</em>。我们将追踪所有八个代码库中的 sub-agent spawn、上下文隔离、资源预算和结果收集，然后提取无论框架如何都成立的设计启发。</p>
+
+<h2>Spawn 频谱</h2>
+
+<p>Sub-agent 存在于一个隔离连续体上。越往右，保证越强——开销也越高：</p>
+
+<div class="spectrum">
+  <span class="left">进程内（In-process）</span>
+  <span class="bar"></span>
+  <span class="right">容器（Container）</span>
+</div>
+
+<div class="diagram">
+进程内 ─── 线程 ─── 子进程 ─── 容器
+   │               │             │               │
+   │               │             │               └─ 完整操作系统隔离
+   │               │             └─ 进程边界，IPC 通信
+   │               └─ 共享内存，GIL 关注
+   └─ 同一堆，上下文对象克隆
+</div>
+
+<p>我们的集合中没有代码库对临时 sub-agent 使用容器（尽管有几个将其用于宿主沙箱）。真正的较量在于进程内克隆与子进程 spawn 之间——这个选择塑造了下游的所有事情。</p>
+
+<h2>Claude Code —— 进程内上下文隔离</h2>
+
+<p>Claude Code 的 sub-agent 系统是我们集合中最复杂的进程内设计。它在同一 Node.js 进程内 spawn 子级，但给每个子级提供隔离的 <code>ToolUseContext</code>，因此它们不会意外修改父级状态。</p>
+
+<h3>Spawn：<code>runAgent()</code></h3>
+
+<p>在 <code>src/tools/AgentTool/runAgent.ts:248</code>，<code>runAgent()</code> 通过调用 <code>createSubagentContext()</code> 创建隔离的 sub-agent。子级获得自己的对话历史、自己的工具集和自己的 abort signal——但它在同一事件循环中运行。</p>
+
+<pre><code>// claude-code: src/tools/AgentTool/runAgent.ts:248
+// runAgent() 为子级创建隔离的 ToolUseContext，
+// spawn sub-agent 对话并收集结果。
+// 父级阻塞（sync 模式）或继续（async 模式）。</code></pre>
+
+<h3>上下文隔离：<code>createSubagentContext()</code></h3>
+
+<p>在 <code>src/utils/forkedAgent.ts:345</code>，<code>createSubagentContext()</code> 克隆三个关键状态：</p>
+
+<ul>
+  <li><strong>readFileState</strong> —— 克隆，以便子级独立跟踪其自己的文件读取；父级的 readFileState 不会被子级读取污染。</li>
+  <li><strong>AbortController</strong> —— 作为子控制器链接，因此取消父级会取消所有后代。</li>
+  <li><strong>setAppState</strong> —— 对异步 sub-agent 替换为 no-op，因为它们无法安全更新共享的 UI 状态。</li>
+</ul>
+
+<h3>三种 sub-agent 模式</h3>
+
+<p>Claude Code 支持三种不同的 sub-agent 模式：</p>
+
+<ol>
+  <li><strong>Synchronous（同步/阻塞）：</strong> 父级暂停直到子级完成。当父级需要子级的答案才能继续时使用。这是默认的 <code>AgentTool</code> 模式。</li>
+  <li><strong>Asynchronous（异步/即发即忘）：</strong> 父级分派子级并立即继续。子级结果稍后通过回调或消息总线传递。用于并行探索任务。</li>
+  <li><strong>Fork：</strong> 在 <code>src/tools/AgentTool/forkSubagent.ts:1</code>，fork subagent 继承父级的对话上下文并使用字节相同的 API 前缀。这允许 LLM 提供商在父级和子级之间<em>共享 prompt cache 条目</em>——对于深度嵌套委派来说，这是显著的成本优化。</li>
+</ol>
+
+<h3>Swarm 模式</h3>
+
+<p>在 <code>src/utils/swarm/backends/InProcessBackend.ts</code>，<code>TeammateExecutor</code> 使用基于文件的 mailbox 实现多 agent 编排。每个 agent 写入并从指定文件读取，完全在一个进程内创建异步消息传递系统。文件系统充当持久化、可检查的消息总线。</p>
+
+<h2>Hermes-agent —— ThreadPoolExecutor 配合迭代预算</h2>
+
+<p>Hermes-agent 采用线程级方法：每个 sub-agent 在共享池的线程中运行，具有框架强制执行的严格资源限制。</p>
+
+<h3>Delegate 工具</h3>
+
+<p>在 <code>tools/delegate_tool.py</code>，<code>delegate_task()</code> 是一流工具。它接受：</p>
+
+<pre><code># hermes-agent: tools/delegate_tool.py
+def delegate_task(
+    goal: str,           # 子级必须完成的目标
+    context: str,        # 给子级的相关背景
+    toolset: list[str],  # 子级可使用的工具
+    role: str = "worker",# "worker" 或 "orchestrator"
+    max_concurrent_children: int | None = None
+) -> str:</code></pre>
+
+<h3>迭代预算</h3>
+
+<p>在 <code>agent/iteration_budget.py</code>，每个 sub-agent 获得自己的 <code>IterationBudget</code>（默认 50 次迭代）。这是关键洞察：<strong>预算必须分开</strong>。一个循环或过度探索的 sub-agent 绝不能耗尽父级的 token 配额。当预算用完时，子级被中断，其部分结果返回给父级。</p>
+
+<h3>子级执行</h3>
+
+<p><code>_run_single_child()</code> 创建一个子级 <code>AIAgent</code> 实例，具有：</p>
+
+<ul>
+  <li><strong>受限工具集</strong> —— 仅父级明确授予的工具</li>
+  <li><strong>隔离的 task_id</strong> —— 子级对话被独立跟踪</li>
+  <li><strong>聚焦的 system prompt</strong> —— 为子任务重写，而非父级的总体目标</li>
+</ul>
+
+<h3>子级的禁用工具</h3>
+
+<p>默认情况下，子级不能使用：<code>delegate_task</code>（防止失控递归）、<code>clarify</code>（子级应独立解决歧义）、<code>memory</code>（记忆由父级拥有）、<code>send_message</code>（仅父级与用户通信）、<code>execute_code</code>（沙箱关注）。</p>
+
+<h3>并发与嵌套委派</h3>
+
+<p><code>max_concurrent_children</code> 默认为 3。嵌套委派由 <code>role="orchestrator"</code> 结合 <code>delegation.max_spawn_depth</code> 控制——orchestrator 子级可以 spawn 自己的 worker，但深度有上限。subagent 注册表是线程安全的，支持 <code>pause()</code>、<code>resume()</code>、<code>interrupt()</code> 和 <code>list()</code> 操作，用于完整的生命周期管理。</p>
+
+<h2>Pi-mono —— 子进程模型</h2>
+
+<p>Pi-mono 采用了仅次于容器的最高隔离方法：每个 sub-agent 是一个独立的操作系统进程。</p>
+
+<h3>Subagent 扩展</h3>
+
+<p>在 <code>packages/coding-agent/examples/extensions/subagent/index.ts</code>，完整的 subagent 扩展被实现为一个独立模块。这表明 pi-mono 中的 sub-agent 是<em>扩展</em>，而非内置在框架核心中——框架提供 spawn 原语（child_process），扩展定义委派协议。</p>
+
+<h3>三种执行模式</h3>
+
+<ol>
+  <li><strong>Single：</strong> Spawn 一个子级，等待完成，返回结果。</li>
+  <li><strong>Parallel：</strong> Spawn 最多 8 个子级，并发限制为 4。结果在到达时收集。失败的子级不会阻塞兄弟。</li>
+  <li><strong>Chain：</strong> 顺序 spawn 子级，每个接收前一个子级的输出，通过其 prompt 中的 <code>{previous}</code> 占位符。支持管道式分解："查找相关文件" &rarr; "读取那些文件" &rarr; "总结发现。"</li>
+</ol>
+
+<h3>进程级隔离</h3>
+
+<p><code>runSingleAgent()</code> 使用 <code>child_process.spawn()</code> 配合 <code>--mode json</code> 和 <code>--no-session</code> 标志。子级将 JSON 行写入 stdout；父级以流方式读取。每个任务的输出上限为 50KB，防止任何单个子级向父级泛滥数据。</p>
+
+<pre><code>// pi-mono: subagent 扩展
+// child_process.spawn('agent', ['--mode', 'json', '--no-session'])
+// 子级 stdout → JSONL 流 → 父级收集 → 上限 50KB</code></pre>
+
+<h2>Codex —— 多 agent v2</h2>
+
+<p>Codex 的多 agent 系统是我们集合中功能最完整的，为每个生命周期操作提供了专用工具。</p>
+
+<h3>Agent 生命周期工具</h3>
+
+<p>在 <code>codex-rs/core/src/tools/handlers/multi_agents_v2.rs</code>，五个工具构成完整生命周期：</p>
+
+<table>
+  <tr><th>工具</th><th>用途</th></tr>
+  <tr><td><code>spawn_agent</code></td><td>创建带有任务描述的新 sub-agent</td></tr>
+  <tr><td><code>wait_for_agent</code></td><td>阻塞直到特定子级完成，收集其结果</td></tr>
+  <tr><td><code>send_message</code></td><td>向运行中的子级发送中间执行消息</td></tr>
+  <tr><td><code>interrupt_agent</code></td><td>停止运行中的子级并收集其部分结果</td></tr>
+  <tr><td><code>list_agents</code></td><td>枚举所有活跃子级及其状态</td></tr>
+</table>
+
+<h3>Spawn 选项</h3>
+
+<p>在 <code>codex-rs/core/src/agent/control/spawn.rs:86</code>，<code>spawn_agent()</code> 接受 <code>SpawnAgentOptions</code>：</p>
+
+<ul>
+  <li><strong>fork_context</strong> —— 子级是否继承父级的对话</li>
+  <li><strong>fork_context_last_n_turns</strong> —— 包含最近多少轮（滑动窗口）</li>
+  <li><strong>max_threads</strong> —— 子级自身并行操作的线程预算</li>
+</ul>
+
+<h3>加密的 agent 间通信</h3>
+
+<p>Codex 独特地通过 <code>InterAgentCommunication::new_encrypted()</code> 加密所有 agent 间消息。这不是性能优化——它是一种安全属性：即使在同一进程内，agent 也无法在没有明确许可的情况下检查彼此的消息。这在 agent 处理凭证或敏感数据时很重要。</p>
+
+<h2>Nanobot —— asyncio.Tasks</h2>
+
+<p>Nanobot 使用 Python 原生的 asyncio 在单个事件循环中实现轻量级协作 sub-agent。</p>
+
+<h3>Spawn 和管理</h3>
+
+<p>在 <code>nanobot/agent/subagent.py:74</code>，<code>SubagentManager.spawn()</code> 创建一个 <code>asyncio.Task</code>——可能的最轻隔离单元。任务与父级并发运行；管理器跟踪其生命周期。</p>
+
+<pre><code># nanobot: nanobot/agent/subagent.py:74
+class SubagentManager:
+    async def spawn(self, goal: str, tools: list[str]) -> str:
+        task = asyncio.create_task(self._run_child(goal, tools))
+        self._tasks.append(task)
+        return task_id</code></pre>
+
+<h3>结果投递</h3>
+
+<p><code>_announce_result()</code> 通过消息总线将子级结果作为 <code>subagent_result</code> 注入事件发布。父级的上下文管理器接收此事件，并将其作为工具结果注入到父级的对话中——父级永远只将 sub-agent 视为一个异步函数调用。</p>
+
+<h3>状态跟踪</h3>
+
+<p><code>SubagentStatus</code> dataclass 跟踪阶段转换：</p>
+
+<pre><code># nanobot: subagent 状态阶段
+initializing → awaiting_tools → tools_completed → final_response → done
+                                                              ↘ error</code></pre>
+
+<p>并发由 <code>max_concurrent_subagents</code> 配置值控制。</p>
+
+<h2>Opencode —— 子会话</h2>
+
+<p>Opencode 将 sub-agent 建模为子会话，重用与顶级 agent 相同的会话机制。</p>
+
+<h3>TaskTool</h3>
+
+<p>在 <code>packages/opencode/src/tool/task.ts</code>，<code>TaskTool</code> 通过 <code>sessions.create()</code> 创建子会话。子会话是一个完全独立的 agent 对话，拥有自己的上下文窗口、工具集和 abort controller——但它共享相同的进程和相同的 LLM 连接。</p>
+
+<h3>权限派生</h3>
+
+<p>在 <code>packages/opencode/src/agent/subagent-permissions.ts</code>，子级的权限规则集是从父级<em>派生</em>的。这不是简单的复制：派生函数会剥离对 sub-agent 无意义的权限（例如，如果禁用嵌套则移除 <code>allow_agent_spawn</code>），并添加限制（例如，worker 子级仅允许只读文件访问）。</p>
+
+<h3>前台 vs. 后台</h3>
+
+<p>Opencode 支持两种执行模式，直接类比于 Claude Code 的 sync/async 划分：</p>
+<ul>
+  <li><strong>Foreground（前台/阻塞）：</strong> 父级等待子会话完成后才继续。</li>
+  <li><strong>Background（后台/即发即忘）：</strong> 子会话独立运行；父级可以轮询或在完成时接收通知。</li>
+</ul>
+
+<h2>OpenClaw —— 基于 ACP 的委派</h2>
+
+<p>OpenClaw 使用 Agent Communication Protocol (ACP) 作为其委派传输层，使 sub-agent 能够跨进程和网络边界寻址。</p>
+
+<h3>Spawn 参数</h3>
+
+<p>在 <code>src/agents/acp-spawn.ts</code>，<code>SpawnAcpParams</code> 定义了 spawn 合约：</p>
+
+<pre><code>// openclaw: src/agents/acp-spawn.ts
+interface SpawnAcpParams {
+  task: string;              // 子任务描述
+  agentId: string;           // 要 spawn 的 agent 类型
+  resumeSessionId?: string;  // 恢复现有会话
+  model?: string;            // 子级的 model 覆盖
+  thinking?: boolean;        // 启用 extended thinking
+  sandbox?: SandboxSpec;     // 沙箱配置
+  streamTo?: string;         // 将结果流式传输到的频道
+}</code></pre>
+
+<h3>多 agent 路由</h3>
+
+<p>OpenClaw 的 ACP 层为 agent 间通信提供了 24 个 channel。每个 agent 订阅它关心的 channel；ACP 路由器按 channel 订阅投递消息，而不是按 agent 身份。这种解耦意味着 agent 可以在不重新配置路由表的情况下添加、删除或替换。</p>
+
+<h2>对比表格</h2>
+
+<table>
+  <tr><th>代码库</th><th>Spawn 模型</th><th>上下文隔离</th><th>并发</th><th>预算模型</th><th>结果流</th><th>嵌套</th></tr>
+  <tr><td><strong>claude-code</strong></td><td>进程内（forked context）</td><td>克隆的 ToolUseContext</td><td>Sync + Async + Swarm</td><td>共享（父级管理）</td><td>返回值 / 回调</td><td>是（fork）</td></tr>
+  <tr><td><strong>hermes-agent</strong></td><td>ThreadPoolExecutor</td><td>新 AIAgent 实例</td><td>max_concurrent_children=3</td><td>每子级 IterationBudget（50）</td><td>返回值（阻塞）</td><td>是（orchestrator 角色，最大深度）</td></tr>
+  <tr><td><strong>pi-mono</strong></td><td>child_process.spawn()</td><td>操作系统进程边界</td><td>最大 8，并发 4</td><td>每任务 50KB 输出上限</td><td>JSONL stdout 流</td><td>是（chain 模式）</td></tr>
+  <tr><td><strong>codex</strong></td><td>进程内（agent 控制）</td><td>fork_context + 加密通信</td><td>每子级 max_threads</td><td>共享（沙箱强制执行）</td><td>wait_for_agent / send_message</td><td>是（嵌套 spawn_agent）</td></tr>
+  <tr><td><strong>nanobot</strong></td><td>asyncio.Task</td><td>消息总线注入</td><td>max_concurrent_subagents</td><td>事件循环协作</td><td>subagent_result 事件</td><td>隐式（通过 spawn）</td></tr>
+  <tr><td><strong>opencode</strong></td><td>子会话（sessions.create）</td><td>派生的权限规则集</td><td>Foreground + Background</td><td>每会话上下文窗口</td><td>会话结果</td><td>可配置</td></tr>
+  <tr><td><strong>openclaw</strong></td><td>ACP spawn</td><td>ACP channel 隔离</td><td>24 个 ACP channel</td><td>每 agent model + thinking 配置</td><td>Channel 订阅</td><td>是（ACP 路由）</td></tr>
+</table>
+
+<h2>设计启发</h2>
+
+<div class="callout">
+  <strong>"隔离是定义性维度——sub-agent 能看到什么决定了它能做什么。"</strong><br>
+  Sub-agent 系统中的每个设计决策都源于隔离边界。进程内克隆（claude-code、codex）速度快且对缓存友好，但需要严格的上下文分离。进程 spawn（pi-mono）在构造上是安全的，但每次委派都要付出 IPC 开销。线程池（hermes-agent）处于中间位置——在 Python GIL 下足够安全，但隔离是约定性的，而非由操作系统强制执行的。
+</div>
+
+<div class="callout">
+  <strong>"预算必须分开：sub-agent 不应该耗尽父级的 token 配额。"</strong><br>
+  Hermes-agent 的每子级 IterationBudget 是对这一原则最清晰的表达。Nanobot 通过 asyncio 协作调度隐式实现了它。Claude Code 依赖父级管理预算（通过 AbortController 链接）。所有代码库中关键的失败模式是相同的：一个不受约束的 sub-agent 在探索死胡同时燃烧 token，而父级除了超时杀死子级之外别无他法。
+</div>
+
+<div class="callout">
+  <strong>"Fork 模式（claude-code、codex）用隔离换取缓存效率。"</strong><br>
+  当子级继承父级的对话前缀（fork_context）时，LLM 提供商可以重用父级推理中已缓存的键值对。这节省了大量的 API 成本——但这意味着子级可以"看到"父级的对话。如果父级正在讨论敏感数据，子级会继承其上下文中的该数据。Fork 是一种优化，而非默认——在缓存节省超过隔离关注时使用它。
+</div>
+
+<h2>练习：Sub-agent 设计决策</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>测验</h3>
+
+  <div class="question">Q1. 哪个代码库使用 child_process.spawn() 配合 JSONL stdout 流式输出来获取 sub-agent 结果？</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">claude-code</div>
+    <div class="option" data-q="1" data-a="b">hermes-agent</div>
+    <div class="option" data-q="1" data-a="c">pi-mono</div>
+    <div class="option" data-q="1" data-a="d">opencode</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. 哪个代码库独特地加密所有 agent 间消息，即使在同一进程内？</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">openclaw</div>
+    <div class="option" data-q="2" data-a="b">codex</div>
+    <div class="option" data-q="2" data-a="c">nanobot</div>
+    <div class="option" data-q="2" data-a="d">hermes-agent</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. hermes-agent sub-agent 的默认迭代预算是什么？</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">25 次迭代</div>
+    <div class="option" data-q="3" data-a="b">50 次迭代</div>
+    <div class="option" data-q="3" data-a="c">100 次迭代</div>
+    <div class="option" data-q="3" data-a="d">无默认值；父级必须指定</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+
+  <div class="question">Q4. hermes-agent 中哪些工具对 sub-agent 禁用？</div>
+  <div class="options">
+    <div class="option" data-q="4" data-a="a">read_file、write_file、bash</div>
+    <div class="option" data-q="4" data-a="b">delegate_task、clarify、memory、send_message、execute_code</div>
+    <div class="option" data-q="4" data-a="c">spawn_agent、wait_for_agent、list_agents</div>
+    <div class="option" data-q="4" data-a="d">web_search、web_fetch、browse</div>
+  </div>
+  <div class="feedback" id="feedback4"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'c', 2: 'b', 3: 'b', 4: 'b' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ 正确。';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ 不对——请重新阅读上面相关部分。';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>我们没有涵盖的内容</h2>
+<ul>
+  <li><strong>深入 Swarm 编排</strong> —— 多 agent 协调模式（投票、共识、专业化）在第8课中涵盖。</li>
+  <li><strong>Sub-agent 可观测性</strong> —— 跨 agent 边界的追踪、日志和调试在<a href="0007-ui-transport.html">第7课</a>中涵盖。</li>
+  <li><strong>权限传播</strong> —— 父级权限如何流向（或不流向）子级在<a href="0004-permission-model.html">第4课</a>中涵盖。</li>
+  <li><strong>Sub-agent 错误恢复</strong> —— 重试策略、部分结果处理以及优雅降级模式。</li>
+</ul>
+
+<h2>主要来源</h2>
+<ol>
+  <li><strong>claude-code</strong>：<code>src/tools/AgentTool/runAgent.ts:248</code>（runAgent）、<code>src/utils/forkedAgent.ts:345</code>（createSubagentContext）、<code>src/tools/AgentTool/forkSubagent.ts:1</code>（fork）、<code>src/utils/swarm/backends/InProcessBackend.ts</code>（swarm）</li>
+  <li><strong>hermes-agent</strong>：<code>tools/delegate_tool.py</code>（delegate_task）、<code>agent/iteration_budget.py</code>（IterationBudget）、<code>_run_single_child()</code>（子级执行）、subagent registry</li>
+  <li><strong>pi-mono</strong>：<code>packages/coding-agent/examples/extensions/subagent/index.ts</code>（完整 subagent 扩展）</li>
+  <li><strong>codex</strong>：<code>codex-rs/core/src/tools/handlers/multi_agents_v2.rs</code>（生命周期工具）、<code>codex-rs/core/src/agent/control/spawn.rs:86</code>（spawn_agent）</li>
+  <li><strong>nanobot</strong>：<code>nanobot/agent/subagent.py:74</code>（SubagentManager.spawn）、<code>_announce_result()</code>、<code>SubagentStatus</code> dataclass</li>
+  <li><strong>opencode</strong>：<code>packages/opencode/src/tool/task.ts</code>（TaskTool）、<code>packages/opencode/src/agent/subagent-permissions.ts</code>（派生权限）</li>
+  <li><strong>openclaw</strong>：<code>src/agents/acp-spawn.ts</code>（SpawnAcpParams）、ACP channel 路由</li>
+</ol>
+
+<h2>推荐下一步阅读</h2>
+<ul>
+  <li>如果你想要<strong>功能最完整</strong>的多 agent 系统：追踪 <code>codex/codex-rs/core/src/tools/handlers/multi_agents_v2.rs</code> —— 五个生命周期工具、加密通信和沙箱集成。</li>
+  <li>如果你想要<strong>最干净的预算模型</strong>：阅读 <code>hermes-agent/agent/iteration_budget.py</code> —— 每子级迭代上限是整个集合中最简单、最有效的护栏。</li>
+  <li>如果你想要<strong>最强的隔离</strong>：研究 <code>pi-mono/packages/coding-agent/examples/extensions/subagent/index.ts</code> —— 带有 JSONL 流式输出的 child_process.spawn 是可移植的、可调试的，且由操作系统强制执行。</li>
+  <li>如果你想要<strong>最实用</strong>的模式：<code>claude-code/src/tools/AgentTool/runAgent.ts</code> —— sync/async/fork 三位一体覆盖了绝大多数现实世界中的委派需求。</li>
+</ul>
+
+<div class="callout">
+  <strong>提出后续问题。</strong> 如果本课中有什么不清楚的地方，或者你想深入了解某个特定代码库的 sub-agent 系统，请问你的 agent 老师。所有代码库已克隆并建立索引，位于 <code>/home/shared/teach/agent-study/repos/</code>。
+</div>
+
+<div class="nav">
+  <span><a href="0002-tool-system.html">&larr; 第2课：工具系统</a></span>
+  <span><a href="0007-ui-transport.html">第7课：UI 与传输层 &rarr;</a></span>
+</div>
+
+<script src="../../assets/lang-switcher.js"></script>
+</body>
+</html>
