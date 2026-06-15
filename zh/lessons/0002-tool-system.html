@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第2课：工具系统 — 定义、注册、调度、规范化</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  .spectrum { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0; padding: 0.8rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.82rem; }
+  .spectrum .left { font-weight: 600; }
+  .spectrum .right { font-weight: 600; }
+  .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="../../lessons/0002-tool-system.html" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>第2课：工具系统 — 定义、注册、调度、规范化</h1>
+<p class="subtitle">定义、注册、调度、规范化 — 每个 agent 工具必经的四个阶段。</p>
+<p class="meta">2026年6月 · 7个主要源代码库 · <a href="0002-tool-system.html">永久链接</a></p>
+
+<p class="sidenote">每个 agent 中的每个工具都精确地经历四个阶段：必须被<strong>定义</strong>（让 LLM 知道其 schema）、<strong>注册</strong>（让 harness 能找到它）、<strong>调度</strong>（让它实际运行），以及<strong>规范化</strong>（让结果能反馈回对话中）。各代码库之间的差异全在于它们<em>如何</em>实现这四个阶段。</p>
+
+<p>在<a href="0001-core-agent-loop.html">第1课</a>中，我们看到每个 agent 都围绕一个循环构建。本课深入到该循环的内部引擎：<em>工具是如何工作的</em>。我们将追踪全部七个代码库中的四个阶段，并识别出划分它们的三类基本设计哲学。</p>
+
+<h2>四个阶段</h2>
+
+<p>每次工具交互都遵循以下管道：</p>
+
+<div class="diagram">
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   定义        │ →  │   注册        │ →  │   调度        │ →  │   规范化      │
+│   DEFINE     │    │  REGISTER    │    │  DISPATCH    │    │  NORMALIZE   │
+│              │    │              │    │              │    │              │
+│ Schema、     │    │ 注册表、     │    │ 执行、       │    │ 结果 →       │
+│ 参数、       │    │ 发现、       │    │ 沙箱、       │    │ LLM 可读     │
+│ 描述         │    │ 可用性       │    │ 权限         │    │ 消息         │
+└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+</div>
+
+<h2>三类设计哲学</h2>
+
+<p>纵观七个代码库，浮现出三种截然不同的哲学：</p>
+
+<div class="spectrum">
+  <span class="left">极致简约</span>
+  <span class="bar"></span>
+  <span class="right">全流程编排</span>
+</div>
+
+<ol>
+  <li><strong>极简主义：</strong> pi-mono、openclaw、nanobot。工具是带有 execute 函数的简单对象。没有中央注册表或发现机制 — 工具存放在数组或字典中。框架本身甚至不提供内置工具；工具由使用者提供。</li>
+  <li><strong>类型安全 / 依赖注入：</strong> opencode（Effect-TS）。工具使用运行时校验的 schema 定义，通过依赖注入注册到作用域容器中，调度时自动清理。类型系统保证正确性。</li>
+  <li><strong>全流程编排：</strong> claude-code、codex、hermes-agent。工具经过多阶段管道：权限检查、沙箱选择、执行、重试、结果规范化，以及（claude-code 的）UI 渲染。每个阶段都是独立的关注点，具有可插拔的实现。</li>
+</ol>
+
+<h2>阶段 1：定义 — 工具如何描述自己</h2>
+
+<h3>Schema 优先（pi-mono、openclaw）</h3>
+
+<p>工具实现 <code>AgentTool&lt;TParameters&gt;</code> 接口，该接口扩展了泛型 <code>Tool</code>，增加了 <code>label</code>、<code>execute()</code> 和 <code>executionMode</code>。schema 声明为 TypeScript 泛型 — 类型<em>即是</em> schema。除了工具自身的 <code>execute()</code> 内部逻辑外，没有运行时 schema 校验。</p>
+
+<pre><code>// pi-mono: packages/agent/src/types.ts:365
+export interface AgentTool&lt;TParameters = any, TDetails = any&gt;
+  extends Omit&lt;Tool&lt;TParameters&gt;, 'execute'&gt; {
+  label: string;
+  execute(toolCall, context, options?): Promise&lt;AgentToolResult&lt;TDetails&gt;&gt;;
+  executionMode: 'sequential' | 'parallel';
+}
+
+// openclaw: packages/agent-core/src/types.ts:438 — 结构相同
+export interface AgentTool&lt;TParameters = any, TDetails = any&gt;
+  extends Omit&lt;Tool&lt;TParameters&gt;, 'execute'&gt; {
+  label: string;
+  execute(toolCall, context, options?): Promise&lt;AgentToolResult&lt;TDetails&gt;&gt;;
+  executionMode: 'sequential' | 'parallel';
+}</code></pre>
+
+<h3>Zod 类型对象（claude-code）</h3>
+
+<p>Claude Code 工具是实现 <code>Tool&lt;Input, Output&gt;</code> 接口的对象，使用 Zod schema 作为 <code>inputSchema</code> 和 <code>outputSchema</code>。<code>buildTool()</code> 工厂函数为 7 个生命周期方法填充安全的默认值。</p>
+
+<pre><code>// claude-code: src/Tool.ts:783
+buildTool({
+  name: ToolNames.BASH,
+  description: 'Execute a bash command',
+  inputSchema: BashInputSchema,  // Zod schema
+  async *call(input, context) { /* ... */ },
+  // buildTool 为以下提供默认值：
+  // isConcurrencySafe、isReadOnly、isEnabled、
+  // checkPermissions、validateInput、
+  // renderToolUseMessage、renderToolResultMessage
+})</code></pre>
+
+<h3>JSON Schema 字典（hermes-agent、nanobot）</h3>
+
+<p>两个 Python 代码库都使用 JSON Schema 字典。Hermes-agent 的 <code>ToolEntry</code> 存储一个 <code>schema</code> 字典；nanobot 的 <code>Tool</code> ABC 有一个返回 JSON Schema 字典的 <code>parameters</code> 属性。区别在于：nanobot 使用 Python ABC 配合 <code>@tool_parameters</code> 装饰器进行声明式 schema 附加，而 hermes-agent 直接将 schema 字典传给 <code>registry.register()</code>。</p>
+
+<pre><code># hermes-agent: tools/registry.py:77
+class ToolEntry:
+  name: str
+  toolset: str
+  schema: dict            # OpenAI 格式的 JSON Schema
+  handler: Callable       # 同步或异步
+  check_fn: Callable | None  # 可用性守门
+
+# nanobot: nanobot/agent/tools/base.py:124
+class Tool(ABC):
+  name: str
+  description: str
+  parameters: dict        # JSON Schema
+  async def execute(self, **kwargs): ...
+
+  @tool_parameters(StringParam("query", "..."))
+  async def search(self, query: str): ...</code></pre>
+
+<h3>Rust trait 驱动（codex）</h3>
+
+<p>Codex 使用 Rust trait：<code>CoreToolRuntime</code> 用于工具处理器，<code>ToolOutput</code> 用于结果，<code>ToolSpec</code> 用于 schema 定义。类型系统在编译时强制保证正确性。</p>
+
+<pre><code>// codex: codex-rs/core/src/tools/registry.rs:47
+pub trait CoreToolRuntime: Send + Sync {
+  fn apply_patch(&self, input) -> ...;
+  fn shell(&self, input) -> ...;
+  fn exec(&self, input) -> ...;
+  fn mcp_dynamic_tool(&self, input) -> ...;
+  fn view_image(&self, input) -> ...;
+  // ... 30+ 个方法，每个工具处理器一个
+}</code></pre>
+
+<table>
+  <tr><th>代码库</th><th>定义格式</th><th>Schema 校验</th></tr>
+  <tr><td>pi-mono / openclaw</td><td>TypeScript 泛型接口</td><td>工具级别（手动）</td></tr>
+  <tr><td>claude-code</td><td>Zod 类型对象</td><td>Zod 解析输入</td></tr>
+  <tr><td>hermes-agent</td><td>OpenAI 格式 JSON Schema 字典</td><td>Schema 传给 LLM API</td></tr>
+  <tr><td>nanobot</td><td>JSON Schema + ABC</td><td>在 prepare_call() 中做 JSON Schema 校验</td></tr>
+  <tr><td>codex</td><td>Rust trait + ToolSpec</td><td>编译时 + serde</td></tr>
+  <tr><td>opencode</td><td>Effect Schema</td><td>Schema.decodeUnknownEffect</td></tr>
+</table>
+
+<h2>阶段 2：注册 — 工具如何被发现</h2>
+
+<p>注册策略与所选语言和框架高度相关：</p>
+
+<p><strong>无注册表（pi-mono、openclaw）：</strong> 工具以 <code>AgentTool[]</code> 数组的形式传递到 <code>AgentContext</code> 上。使用者完全拥有工具的生命周期。这是最简单的方法 — 也最灵活，因为没有框架需要对抗。</p>
+
+<p class="sidenote">pi-mono 的方法："原语而非特性"。框架不提供任何内置工具。四个工具（read、write、edit、bash）定义在应用层，而非框架层。</p>
+
+<p><strong>扁平数组配合条件包含（claude-code）：</strong> <code>src/tools.ts:193</code> 中的 <code>getAllBaseTools()</code> 返回包含 30+ 个工具的扁平数组。工具基于 feature flag（<code>REPLTool</code>、<code>WebBrowserTool</code>）和权限上下文进行条件包含。MCP 工具通过 <code>assembleToolPool()</code>（第 345 行）合入，并进行去重。</p>
+
+<p><strong>单例注册表配合 AST 发现（hermes-agent）：</strong> <code>tools/registry.py:151</code> 中的 <code>ToolRegistry</code> 单例存储所有工具。<code>discover_builtin_tools()</code>（第 57 行）中的发现逻辑用 <code>ast</code> 模块扫描 <code>tools/*.py</code> — 它在<em>导入模块之前</em>先解析 Python 源码来查找 <code>registry.register(...)</code> 调用。这避免了导入依赖不可用（Docker、Playwright 等）的工具时产生的副作用。</p>
+
+<p><strong>包扫描（nanobot）：</strong> <code>nanobot/agent/tools/loader.py:21</code> 中的 <code>ToolLoader</code> 使用 <code>pkgutil.iter_modules</code> 发现 <code>Tool</code> 子类，并通过 <code>entry_points(group="nanobot.tools")</code> 支持插件发现。<code>_plugin_discoverable</code> 类属性可防止抽象基类被自动发现。</p>
+
+<p><strong>每轮构建（codex）：</strong> <code>spec_plan.rs</code> 中的 <code>build_tool_router()</code> 每轮重新构建 <code>ToolRouter</code>。它整合了 MCP 工具、动态工具（运行时发现）、扩展工具和标准工具。路由器将 <code>ToolName</code> 映射到 <code>ToolRegistry</code> 条目。</p>
+
+<p><strong>依赖注入 + 作用域（opencode）：</strong> <code>registry.ts</code> 中的 <code>ToolRegistry.Service</code> 使用 Effect 的 <code>Layer</code>/<code>Scope</code> 进行依赖注入。工具注册到作用域容器中，在作用域退出时自动清理。<code>materialize()</code> 方法为 LLM 快照工具定义。</p>
+
+<h2>阶段 3：调度 — 工具如何执行</h2>
+
+<h3>执行时机</h3>
+
+<p>如第1课所述，分为两大阵营：</p>
+<ul>
+  <li><strong>批量（流结束后）：</strong> pi-mono、openclaw、nanobot、hermes-agent — 等待 LLM 流完成后，收集工具调用，一起执行</li>
+  <li><strong>流式（流进行中）：</strong> claude-code — <code>StreamingToolExecutor</code> 在 LLM 逐个输出时即执行工具</li>
+  <li><strong>混合：</strong> codex — <code>FuturesOrdered</code> 在流式传输过程中排空进行中的工具 future；opencode — 可配置</li>
+</ul>
+
+<h3>并发模型</h3>
+
+<p>每个代码库都有“哪些工具可以一起运行”的概念：</p>
+
+<table>
+  <tr><th>代码库</th><th>并发模型</th><th>实现</th></tr>
+  <tr><td>pi-mono</td><td>顺序或并行（Promise.all）</td><td><code>executeToolCallsSequential</code> / <code>executeToolCallsParallel</code></td></tr>
+  <tr><td>openclaw</td><td>顺序或并行（Promise.all）</td><td>与 pi-mono 相同模式，每个工具有 <code>executionMode</code></td></tr>
+  <tr><td>claude-code</td><td>并发安全工具并行，其他串行</td><td><code>StreamingToolExecutor</code> 按 <code>isConcurrencySafe()</code> 分区</td></tr>
+  <tr><td>hermes-agent</td><td>顺序（同步上下文 + 异步桥接）</td><td><code>_run_async()</code> 使用每线程 event loop 处理协程</td></tr>
+  <tr><td>nanobot</td><td>顺序，带 <code>concurrency_safe</code> 标志</td><td><code>Tool.concurrency_safe</code> / <code>Tool.exclusive</code> 属性</td></tr>
+  <tr><td>codex</td><td>通过 Tokio + FuturesOrdered 并行</td><td><code>tool_supports_parallel()</code> 控制并发执行</td></tr>
+  <tr><td>opencode</td><td>通过 Effect fiber 顺序 settle</td><td>每次 <code>settle()</code> 调用是其自身 Effect</td></tr>
+</table>
+
+<h3>沙箱</h3>
+
+<p>只有一个代码库有真正的沙箱方案：</p>
+
+<p><strong>codex：</strong> <code>ToolOrchestrator</code>（orchestrator.rs）提供多层沙箱：Landlock（Linux）、Windows 沙箱、macOS 沙箱、提升/受限 token。当沙箱拒绝时，编排器可以<em>以提升的沙箱级别重试</em> — 如果受限沙箱阻止了文件写入，工具可以用提升的沙箱重试。网络访问审批是一个一等概念，支持立即和延迟两种模式。</p>
+
+<p>所有其他代码库将沙箱化委托给外部机制：pi-mono/openclaw 使用 <code>beforeToolCall</code> 钩子，hermes-agent 使用基于环境的终端，claude-code 使用工具访问的权限检查（而非执行沙箱）。</p>
+
+<h2>阶段 4：规范化 — 结果如何反馈</h2>
+
+<p>执行后，工具结果必须变成 LLM 可以消费的消息。这是分歧最大的环节：</p>
+
+<p><strong>大小截断（全部）：</strong> 每个代码库都有最大结果大小限制。Claude Code 的 <code>applyToolResultBudget()</code> 将大结果持久化到磁盘，替换为截断后的预览。Hermes-agent 的 <code>max_result_size_chars</code> 按工具截断。Nanobot 将 <code>read_file</code> 排除在卸载之外，以防止“持久化到磁盘 → 从磁盘读取”的循环。</p>
+
+<p><strong>错误规范化（全部）：</strong> 所有代码库都捕获工具异常并将其转换为 LLM 可以理解的错误消息。Hermes-agent 和 nanobot 返回 <code>{"error": "..."}</code> JSON 字符串。pi-mono/openclaw 创建带 <code>isError: true</code> 的 <code>ToolResultMessage</code> 对象。Codex 使用 <code>FunctionCallError</code> 变体。</p>
+
+<p><strong>进度流式传输（pi-mono、openclaw）：</strong> <code>AgentToolResult</code> 可以包含一个 <code>progress</code> 回调用于部分流式传输，允许 UI 在完成前显示增量的工具输出。OpenClaw 在 pi-mono 的基础上添加了这一特性。</p>
+
+<p><strong>逐工具渲染（claude-code）：</strong> 独特之处在于，Claude Code 工具有 7+ 个渲染方法（<code>renderToolUseMessage</code>、<code>renderToolResultMessage</code>、<code>renderToolUseProgressMessage</code> 等）— 工具结果不仅是给 LLM 的消息，还是 TUI 的 UI 产物。</p>
+
+<h2>对比总表</h2>
+
+<table>
+  <tr><th>维度</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th></tr>
+  <tr><td><strong>工具数量</strong></td><td>4（应用定义）</td><td>不适用（框架）</td><td>30+</td><td>80+</td><td>~20</td><td>30+ 个处理器</td><td>~15</td></tr>
+  <tr><td><strong>定义</strong></td><td>TS 泛型</td><td>TS 泛型</td><td>Zod 对象</td><td>JSON Schema 字典</td><td>ABC + JSON Schema</td><td>Rust trait</td><td>Effect Schema</td></tr>
+  <tr><td><strong>注册表</strong></td><td>无（数组）</td><td>无（数组）</td><td>扁平数组</td><td>单例 + AST</td><td>字典 + pkgutil</td><td>Trait + 每轮构建</td><td>WeakMap + DI</td></tr>
+  <tr><td><strong>发现</strong></td><td>使用者提供</td><td>使用者提供</td><td>Feature flag</td><td>AST 扫描 + MCP</td><td>pkgutil + 插件</td><td>每轮构建</td><td>基于作用域</td></tr>
+  <tr><td><strong>沙箱</strong></td><td>无（钩子）</td><td>无（钩子）</td><td>无（权限）</td><td>无（环境）</td><td>无</td><td>多层 + 重试</td><td>无</td></tr>
+  <tr><td><strong>并发</strong></td><td>顺序/并行</td><td>顺序/并行</td><td>分区</td><td>顺序 + 异步桥接</td><td>顺序 + 标志</td><td>Tokio 并行</td><td>顺序（Effect）</td></tr>
+  <tr><td><strong>结果处理</strong></td><td>ToolResultMessage</td><td>ToolResultMessage + 进度</td><td>7+ 渲染方法 + 卸载</td><td>JSON 字符串</td><td>原始 + 错误字符串</td><td>ToolOutput trait</td><td>Schema 编码</td></tr>
+  <tr><td><strong>独特之处</strong></td><td>钩子生命周期</td><td>进度流式传输</td><td>逐工具 UI 渲染</td><td>工具集 + TTL 缓存</td><td>插件发现</td><td>沙箱升级</td><td>作用域清理</td></tr>
+</table>
+
+<h2>核心权衡：复杂度预算</h2>
+
+<p>工具系统是各代码库分歧最大的地方。pi-mono 有零行工具注册表代码。Codex 有一整套 <code>ToolOrchestrator</code>，包含审批、沙箱选择和重试升级。为什么？</p>
+
+<p><strong>更多的工具基础设施 = 更多的安全保障，但需要维护更多代码。</strong> Codex 的沙箱重试逻辑意味着由于受限沙箱的权限拒绝而失败的工具可以自动以提升的权限重试 — 用户无需重新运行。但这也意味着一个多阶段管道，仅工具编排就需要 10+ 个文件。</p>
+
+<p><strong>更少的工具基础设施 = 更大的灵活性，但消费者负担更重。</strong> pi-mono 给你 <code>AgentTool[]</code> 然后说“开始吧”。你可以实现任何你想要的工具系统。但你<em>必须</em>自己实现 — 框架不会帮你做权限检查、沙箱、结果规范化或错误恢复。</p>
+
+<div class="callout">
+  <strong>设计启发：</strong> 如果你控制执行环境且信任你的工具，从极简开始 — 一个包含 execute 函数的对象数组。如果你需要沙箱隔离、权限守门和可观测性，编排式方法（codex、claude-code）是值得的 — 但要预见到工具系统将成为你代码库中<em>最大</em>的子系统。
+</div>
+
+<h2>练习：分类工具系统</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>测验</h3>
+
+  <div class="question">Q1. 哪个代码库使用基于 AST 的源码解析在导入前发现工具？</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">nanobot</div>
+    <div class="option" data-q="1" data-a="b">codex</div>
+    <div class="option" data-q="1" data-a="c">hermes-agent</div>
+    <div class="option" data-q="1" data-a="d">opencode</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. 唯一一个具有多层沙箱并支持提升权限重试的代码库是哪个？</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">claude-code</div>
+    <div class="option" data-q="2" data-a="b">codex</div>
+    <div class="option" data-q="2" data-a="c">opencode</div>
+    <div class="option" data-q="2" data-a="d">hermes-agent</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. hermes-agent 中的 "toolset" 系统主要用于什么？</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">沙箱化工具执行</div>
+    <div class="option" data-q="3" data-a="b">分组工具以便选择</div>
+    <div class="option" data-q="3" data-a="c">定义工具 schema</div>
+    <div class="option" data-q="3" data-a="d">规范化工具结果</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'c', 2: 'b', 3: 'b' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ 正确。';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ 不太对 — 请重新阅读上方相关章节。';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>我们尚未涵盖的内容</h2>
+<ul>
+  <li><strong>MCP（Model Context Protocol）集成</strong> — 外部工具如何被发现和集成（hermes-agent、claude-code、codex 的相关内容<a href="0002-tool-system.html">在此</a>）</li>
+  <li><strong>面向 UI 的工具输出渲染</strong> — 见<a href="0007-ui-transport.html">第7课</a></li>
+  <li><strong>工具调度中的权限检查</strong> — 见<a href="0004-permission-model.html">第4课</a></li>
+</ul>
+
+<h2>主要源码出处</h2>
+<ol>
+  <li><strong>pi-mono</strong>：<code>packages/agent/src/types.ts:365</code>（AgentTool），<code>agent-loop.ts:373</code>（executeToolCalls）</li>
+  <li><strong>openclaw</strong>：<code>packages/agent-core/src/types.ts:438</code>（AgentTool），<code>agent-loop.ts:258</code>（runLoop）</li>
+  <li><strong>claude-code</strong>：<code>src/Tool.ts:362</code>（Tool 接口），<code>src/tools.ts:193</code>（getAllBaseTools），<code>src/services/tools/StreamingToolExecutor.ts</code></li>
+  <li><strong>hermes-agent</strong>：<code>tools/registry.py:77</code>（ToolEntry），<code>:151</code>（ToolRegistry），<code>:57</code>（discover_builtin_tools），<code>toolsets.py</code>（toolset 系统）</li>
+  <li><strong>nanobot</strong>：<code>nanobot/agent/tools/base.py:124</code>（Tool ABC），<code>registry.py:9</code>（ToolRegistry），<code>loader.py:21</code>（ToolLoader）</li>
+  <li><strong>codex</strong>：<code>codex-rs/core/src/tools/registry.rs:47</code>（CoreToolRuntime），<code>orchestrator.rs</code>（ToolOrchestrator）</li>
+  <li><strong>opencode</strong>：<code>packages/core/src/tool/tool.ts:20</code>（Tool.make），<code>registry.ts</code>（ToolRegistry）</li>
+</ol>
+
+<h2>推荐后续阅读</h2>
+<ul>
+  <li>如果你想了解<strong>最复杂</strong>的工具系统：追踪 <code>codex/codex-rs/core/src/tools/orchestrator.rs</code> — 审批 → 沙箱 → 执行 → 重试管道。</li>
+  <li>如果你想了解<strong>最独特</strong>的发现机制：阅读 <code>hermes-agent/tools/registry.py</code> — 基于 AST 的工具扫描在其他 6 个代码库中绝无仅有。</li>
+  <li>如果你想了解<strong>最实用</strong>的模式：<code>codex/codex-rs/core/src/tools/router.rs</code> — 每轮构建全新路由器并进行工具搜索，这是一个清晰、可测试的模式。</li>
+</ul>
+
+<div class="callout">
+  <strong>有问题可以追问。</strong> 如果本课中有任何不清楚的地方，或者你想深入了解某个特定代码库的工具系统，可以向你的 agent 老师提问。所有代码库已克隆并索引在 <code>/home/shared/agent-study/repos/</code>。
+</div>
+
+<div class="nav">
+  <span><a href="0001-core-agent-loop.html">&larr; 第1课：核心循环</a></span>
+  <span><a href="0003-context-management.html">第3课：上下文管理 &rarr;</a></span>
+</div>
+
+<script src="../../assets/lang-switcher.js"></script>
+</body>
+</html>

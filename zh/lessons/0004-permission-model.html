@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第4课：权限模型 — 钩子、ACL、沙箱及其间的光谱</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  .spectrum { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0; padding: 0.8rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.82rem; }
+  .spectrum .left { font-weight: 600; }
+  .spectrum .right { font-weight: 600; }
+  .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #adb5bd, #ffc107, #dc3545); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="../../lessons/0004-permission-model.html" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>第4课：权限模型</h1>
+<p class="subtitle">从"完全信任 LLM"到"什么也不信任" — 七个 agent 代码库如何决定一个工具能做什么、不能做什么。</p>
+<p class="meta">2026年6月 · 7个主要源代码库 · <a href="0004-permission-model.html">永久链接</a></p>
+
+<p class="sidenote">AI agent 中的权限模型回答两个问题：<strong>LLM 能请求这个工具吗？</strong>以及<strong>harness 能安全执行它吗？</strong>这是两个不同的问题，代码库在生命周期的不同时间点给出答案。钩子、ACL 和沙箱之间的区别在于检查<em>何时</em>发生以及<em>谁</em>来执行。</p>
+
+<p>在<a href="0002-tool-system.html">第2课</a>中，我们看到工具调度是每个 agent 循环中的中心阶段。本课深入到守卫该调度的权限检查 — 每个代码库如何防止 LLM 做不该做的事。</p>
+
+<h2>权限光谱</h2>
+
+<p>每个代码库都位于这条连续谱的某个位置：</p>
+
+<div class="spectrum">
+  <span class="left">无权限</span>
+  <span class="bar"></span>
+  <span class="right">完全沙箱化</span>
+</div>
+
+<ol>
+  <li><strong>无权限：</strong> nanobot、hermes-agent — 工具无条件运行。任何守卫（check_fn、SSRF 检测）是可用性或安全网，而非安全边界。</li>
+  <li><strong>基于钩子的委托：</strong> pi-mono、openclaw — 框架提供一个 <code>beforeToolCall</code> 钩子；调用者实现其想要的任何权限逻辑。框架本身是中立的。</li>
+  <li><strong>ACL（访问控制列表）：</strong> claude-code、opencode — 每个工具有一个权限级别（allow、ask、deny）。规则在注册时（LLM 能看到什么）和执行时（实际运行什么）评估。</li>
+  <li><strong>完全沙箱化：</strong> codex — OS 内核强制边界。工具在 Landlock、Windows 沙箱或 macOS 沙箱内运行。沙箱可以在重试时升级。</li>
+</ol>
+
+<h2>Claude Code — 权限钩子 + ACL</h2>
+
+<p>Claude Code 拥有七个代码库中最完善的 ACL 系统。权限检查是每个工具上一等的生命周期方法。</p>
+
+<h3>逐工具权限检查</h3>
+
+<p><code>src/Tool.ts</code> 中的每个工具都有一个 <code>checkPermissions()</code> 方法。<code>buildTool()</code> 工厂提供一个安全的默认值 — 如果工具作者不覆盖它，工具默认为询问用户。这意味着<em>新工具默认是安全的</em>。</p>
+
+<pre><code>// claude-code: src/Tool.ts — 每个工具自带权限检查
+buildTool({
+  name: ToolNames.BASH,
+  // ... schema、调用处理器 ...
+  // buildTool 为以下提供默认值：
+  // checkPermissions(input, context) — 默认：询问用户
+  // isConcurrencySafe、isReadOnly、isEnabled、
+  // validateInput、renderToolUseMessage、renderToolResultMessage
+})</code></pre>
+
+<h3>权限过滤管道</h3>
+
+<p>到达 LLM 的工具列表不是全部已注册工具的集合。依次应用三个过滤器：</p>
+
+<pre><code>// claude-code: src/tools.ts:271 — getTools() 按上下文和模式过滤
+// 仅返回当前权限上下文中允许的工具。
+// 工具可被以下方式排除：权限模式、feature flag、deny 规则。
+
+// claude-code: src/tools.ts:263 — filterToolsByDenyRules()
+// 在 LLM 看到工具列表之前应用用户配置的 deny 规则。
+// Deny 规则可以按名称针对特定工具。
+
+// claude-code: src/tools.ts:345 — assembleToolPool()
+// 合并内置工具 + MCP 工具并进行去重。
+// MCP 工具继承会话的权限上下文。</code></pre>
+
+<h3>权限级别与持久化</h3>
+
+<p>每个工具可设为三种级别之一：<strong>allow</strong>（不询问直接运行）、<strong>ask</strong>（每次提示用户）或 <strong>deny</strong>（直接阻止）。<code>--dangerously-bypass-permissions</code> 标志绕过所有检查 — 为自动化环境提供的显式逃生舱。</p>
+
+<p>权限决定在三个作用域中持久化：<strong>会话级</strong>（当前调用有效）、<strong>项目级</strong>（存储在 <code>.claude/settings.json</code>）和<strong>用户级</strong>（存储在 <code>~/.claude/settings.json</code>）。这给用户对权限授权持续时间的精细控制。</p>
+
+<h2>Codex — 多层沙箱</h2>
+
+<p>Codex 是唯一一个拥有真正沙箱方案的代码库。当 Claude Code 问"应该运行这个工具吗？"，Codex 问"操作系统能强制这个工具无法逃脱吗？"</p>
+
+<h3>编排器管道</h3>
+
+<p><code>codex-rs/core/src/tools/orchestrator.rs</code> 中的 <code>ToolOrchestrator</code> 使每个工具通过一个四阶段管道：</p>
+
+<div class="diagram">
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   审批        │ →  │   沙箱        │ →  │   执行        │ →  │   重试        │
+│  APPROVAL    │    │  SELECTION   │    │  EXECUTE     │    │  （提升沙箱） │
+│              │    │              │    │              │    │              │
+│ 用户提示     │    │ Landlock /   │    │ 在沙箱内     │    │ 如果沙箱     │
+│ 或自动       │    │ Win / Mac    │    │ 运行工具     │    │ 阻止，以更高  │
+│ 批准         │    │ 沙箱选择     │    │              │    │ 级别重试     │
+└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+</div>
+
+<p><strong>审批：</strong> 执行前，编排器检查工具是否需要用户批准。网络访问有自己独立的审批系统，支持两种模式：<strong>立即</strong>（现在询问）和<strong>延迟</strong>（允许工具运行但阻止网络使用直到批准）。</p>
+
+<p><strong>沙箱选择：</strong> 编排器为平台选择适当的沙箱：Linux 上的 <strong>Landlock</strong>（内核级文件系统限制）、<strong>Windows 沙箱</strong>或 <strong>macOS 沙箱</strong>。每个沙箱有受限和提升两种变体。</p>
+
+<p><strong>提升重试：</strong> 这是其独特功能。如果工具失败是因为受限沙箱阻止了某个操作（例如在 workspace 外写入文件），编排器可以<em>以提升的沙箱重试</em> — 用户无需重新提示。沙箱变成了动态属性而非静态墙壁。</p>
+
+<h3>并行执行安全</h3>
+
+<p><code>codex-rs/core/src/tools/parallel.rs</code> 定义了 <code>ToolCallRuntime</code>，它管理并发的工具执行。每个工具的沙箱是独立的，因此并行工具不能互相干扰 — 这是基于钩子和基于 ACL 的系统无法保证的属性。</p>
+
+<h2>Opencode — 基于 ACL</h2>
+
+<p>Opencode 使用 Effect-TS 将权限规则编码到类型系统中。权限检查在两个时间点发生：<strong>物化时</strong>（工具定义发送给 LLM 之前）和<strong>执行时</strong>（工具实际运行时）。</p>
+
+<h3>子 agent 权限派生</h3>
+
+<pre><code>// opencode: packages/opencode/src/agent/subagent-permissions.ts
+// deriveSubagentSessionPermission():
+//   父级 deny 规则 + 子 agent allow 规则
+//   = 有效的子 agent 权限集
+//
+// 子 agent 只能使用满足以下条件的工具：
+//   1. 父级 NOT 明确 deny，AND
+//   2. 子 agent 自身的 allow 规则允许</code></pre>
+
+<h3>工具执行包装</h3>
+
+<p><code>packages/core/src/tool/tool.ts</code> 提供了 <code>withPermission()</code>，它包装工具执行。包装器在工具的 <code>execute()</code> 被调用之前检查权限规则。如果被 deny，工具永远不会运行 — LLM 收到一个错误结果。</p>
+
+<p><code>packages/core/src/tool/registry.ts</code> 在<strong>物化时</strong> — 即工具列表发送给 LLM 之前 — 应用权限规则。如果一个工具被 deny，LLM 甚至无法在 function list 中看到它。这是一个关键的设计选择：<em>如果 LLM 不能请求它，它就不能社交工程用户去批准它。</em></p>
+
+<h3>危险工具的默认 deny</h3>
+
+<p>两个工具在子 agent 中默认 deny：<code>todowrite</code> 和 <code>task</code>。<code>Wildcard.match</code> 实用工具用于工具名称的 deny 规则匹配，支持 glob 模式，以便单条规则可以覆盖工具族（例如 <code>mcp__*</code> 拒绝所有 MCP 工具）。</p>
+
+<h2>Pi-mono、OpenClaw — 基于钩子的委托</h2>
+
+<p>pi-mono 和 openclaw 都不自带内置权限系统。相反，框架在 <code>agent-loop.ts</code> 中公开一个 <code>beforeToolCall</code> 钩子。调用者 — 嵌入 agent 框架的应用程序 — 通过提供钩子函数来实现权限检查。</p>
+
+<pre><code>// pi-mono / openclaw: packages/agent/src/agent-loop.ts
+// 框架在调度前调用 beforeToolCall(toolCall, context)。
+// 如果钩子抛出异常，工具被跳过，错误被包装为
+// 带 isError: true 的 ToolResultMessage。
+//
+// 框架自身对什么被允许<em>没有</em>任何意见。
+// 所有权限逻辑存在于消费者应用程序中。</code></pre>
+
+<p>当工具抛出异常（无论是来自权限钩子还是工具自身），agent 循环捕获该异常并将其包装为错误结果消息。LLM 看到该错误并可以决定如何继续。这意味着权限模型优雅降级 — 被拒绝的工具只是 LLM 可以推理的另一个错误。</p>
+
+<h2>Hermes-agent、Nanobot — 极简 / 无</h2>
+
+<p>这两个 Python 代码库有最薄的权限层。将它们纳入光谱是为了展示"无权限模型"在实践中是什么样子。</p>
+
+<h3>Hermes-agent：check_fn 作为可用性守门</h3>
+
+<p>Hermes-agent 注册表中的每个 <code>ToolEntry</code> 可以有一个 <code>check_fn</code> — 但这是一个<strong>可用性守门</strong>，而非安全边界。它回答"这个工具的依赖是否可用？"（例如 Docker 是否在运行？），而不是"LLM 是否被允许使用这个工具？"。逐工具的 <code>max_result_size_chars</code> 设置是一个资源限制，而非权限检查。</p>
+
+<pre><code># hermes-agent: tools/registry.py:77
+class ToolEntry:
+  name: str
+  check_fn: Callable | None  # "Docker 安装了吗？" — 而非"LLM 能用这个工具吗？"
+  max_result_size_chars: int # 资源上限，非安全措施</code></pre>
+
+<h3>Nanobot：SSRF 检测与 workspace 边界</h3>
+
+<p>Nanobot 的 <code>runner.py</code> 有两个嵌入在工具执行中（而非权限层中）的安全检查：</p>
+
+<ul>
+  <li><strong>SSRF 检测：</strong> 在工具发起 HTTP 请求之前，nanobot 检查目标是否为私有 IP。如果是，工具被阻止，LLM 收到一个递进提示。</li>
+  <li><strong>Workspace 边界违规：</strong> workspace 根目录外的文件操作被检测到，并用递进提示分类 — 从温和的"你在 workspace 之外"到硬性阻止。</li>
+</ul>
+
+<p>这些被归类为<strong>递进提示</strong>，而非权限拒绝。LLM 被轻推而非被阻止 — 一个与基于 ACL 或基于沙箱的方法根本不同的哲学。</p>
+
+<h2>对比总表</h2>
+
+<table>
+  <tr><th>维度</th><th>claude-code</th><th>codex</th><th>opencode</th><th>pi-mono</th><th>openclaw</th><th>hermes-agent</th><th>nanobot</th></tr>
+  <tr><td><strong>审批模型</strong></td><td>ACL（allow/ask/deny）</td><td>沙箱 + 审批</td><td>ACL（Effect-TS）</td><td>钩子（消费者）</td><td>钩子（消费者）</td><td>无（check_fn）</td><td>无（SSRF 提示）</td></tr>
+  <tr><td><strong>沙箱化</strong></td><td>无</td><td>Landlock / Win / Mac + 提升重试</td><td>无</td><td>无</td><td>无</td><td>无</td><td>无</td></tr>
+  <tr><td><strong>权限持久化</strong></td><td>会话 / 项目 / 用户</td><td>每会话</td><td>每会话（派生）</td><td>由消费者定义</td><td>由消费者定义</td><td>不适用</td><td>不适用</td></tr>
+  <tr><td><strong>防护</strong></td><td>Deny 规则，--dangerously-bypass-permissions</td><td>OS 内核强制</td><td>子 agent 中默认 deny task/todowrite</td><td>beforeToolCall 钩子</td><td>beforeToolCall 钩子</td><td>check_fn（可用性）</td><td>SSRF + workspace 边界</td></tr>
+  <tr><td><strong>检查时机</strong></td><td>注册时 + 执行时</td><td>执行时（预检查）</td><td>物化时 + 执行时</td><td>执行时（钩子）</td><td>执行时（钩子）</td><td>注册时（可用性）</td><td>执行时（内联）</td></tr>
+  <tr><td><strong>Deny 时的回退</strong></td><td>用户提示</td><td>提升沙箱并重试</td><td>向 LLM 返回错误结果</td><td>向 LLM 返回错误结果</td><td>向 LLM 返回错误结果</td><td>工具静默排除</td><td>向 LLM 递进提示</td></tr>
+  <tr><td><strong>独特之处</strong></td><td>三级作用域持久化</td><td>重试时沙箱提升</td><td>物化时过滤</td><td>框架零意见</td><td>钩子 + 进度流</td><td>基于 AST 的工具发现</td><td>runner 中 SSRF 检测</td></tr>
+</table>
+
+<h2>核心权衡：安全 vs. 复杂度</h2>
+
+<p>权限模型是安全保障与实现复杂度正面交锋的地方：</p>
+
+<p><strong>更多安全保障 = 更多代码、更多故障模式、更多用户摩擦。</strong> Codex 的沙箱提升意味着工具可以自动重试，但它需要平台特定的沙箱实现（三种不同的 OS 沙箱，每个有自己的 API 和故障模式）。Claude Code 的三级作用域权限持久化给用户精细的控制，但也意味着权限状态可能令人困惑 — "为什么这个工具又问我？我允许的是会话还是项目？"</p>
+
+<p><strong>更少安全基础设施 = 更简单的代码，但用户（或嵌入应用程序）承担所有风险。</strong> Pi-mono 的基于钩子的方法在框架中有零行权限代码。那是优雅的 — 直到 LLM 运行 <code>rm -rf /</code> 而没有人连接钩子。</p>
+
+<div class="callout">
+  <strong>设计启发：</strong> 在<em>注册/物化时</em>的权限检查防止 LLM 请求它不能做的事情。在<em>执行时</em>的权限检查保护 harness 免受 LLM 做不该做的事。最强的系统（claude-code、opencode、codex）两者都做。最弱的（hermes-agent、nanobot）两者都不做 — 它们用可用性守门或用提示轻推，信任 LLM 会守规矩。根据你的威胁模型选择光谱上的位置：如果 LLM 能访问 shell，执行时强制不是可选项。
+</div>
+
+<h2>练习：识别权限模型</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>测验</h3>
+
+  <div class="question">Q1. 唯一使用 OS 级沙箱（Landlock、Windows 沙箱、macOS 沙箱）并支持重试时提升的代码库是哪个？</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">claude-code</div>
+    <div class="option" data-q="1" data-a="b">codex</div>
+    <div class="option" data-q="1" data-a="c">opencode</div>
+    <div class="option" data-q="1" data-a="d">pi-mono</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. 在 opencode 中，权限规则首次在什么时机被用来过滤 LLM 可见的工具？</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">执行时，在 withPermission() 内部</div>
+    <div class="option" data-q="2" data-a="b">物化时，在工具定义发送给 LLM 之前</div>
+    <div class="option" data-q="2" data-a="c">工具注册时，工具首次加载之时</div>
+    <div class="option" data-q="2" data-a="d">会话创建时，agent 初始化时</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. hermes-agent 的 check_fn 主要用于什么？</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">检查 LLM 是否被允许使用该工具</div>
+    <div class="option" data-q="3" data-a="b">检查工具的依赖是否可用（例如 Docker 是否运行）</div>
+    <div class="option" data-q="3" data-a="c">强制沙箱边界</div>
+    <div class="option" data-q="3" data-a="d">校验工具输入 schema</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'b', 2: 'b', 3: 'b' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ 正确。';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ 不太对 — 请重新阅读上方相关章节。';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>我们尚未涵盖的内容</h2>
+<ul>
+  <li><strong>MCP 工具权限继承</strong> — 来自 MCP 服务器的外部工具如何继承会话的权限上下文（claude-code 的 assembleToolPool 相关<a href="0004-permission-model.html">在此</a>）</li>
+  <li><strong>权限 UI / 用户提示</strong> — 询问用户"允许此工具吗？"的 TUI/CLI 提示 — 见<a href="0007-ui-transport.html">第7课</a></li>
+  <li><strong>工具执行沙箱内部机制</strong> — Landlock 规则构造以及平台特定沙箱 API — 见<a href="0002-tool-system.html">第2课</a></li>
+</ul>
+
+<h2>主要源码出处</h2>
+<ol>
+  <li><strong>claude-code</strong>：<code>src/Tool.ts</code>（checkPermissions，buildTool 默认值），<code>src/tools.ts:271</code>（getTools），<code>:263</code>（filterToolsByDenyRules），<code>:345</code>（assembleToolPool）</li>
+  <li><strong>codex</strong>：<code>codex-rs/core/src/tools/orchestrator.rs</code>（ToolOrchestrator 管道），<code>codex-rs/core/src/tools/parallel.rs</code>（ToolCallRuntime）</li>
+  <li><strong>opencode</strong>：<code>packages/opencode/src/agent/subagent-permissions.ts</code>（deriveSubagentSessionPermission），<code>packages/core/src/tool/tool.ts</code>（withPermission），<code>packages/core/src/tool/registry.ts</code>（物化时过滤）</li>
+  <li><strong>pi-mono</strong>：<code>packages/agent/src/agent-loop.ts</code>（beforeToolCall 钩子）</li>
+  <li><strong>openclaw</strong>：<code>packages/agent-core/src/agent-loop.ts</code>（beforeToolCall 钩子，相同模式）</li>
+  <li><strong>hermes-agent</strong>：<code>tools/registry.py:77</code>（ToolEntry.check_fn，max_result_size_chars）</li>
+  <li><strong>nanobot</strong>：<code>nanobot/agent/tools/runner.py</code>（SSRF 检测，workspace 边界违规）</li>
+</ol>
+
+<h2>推荐后续阅读</h2>
+<ul>
+  <li>如果你想了解<strong>最复杂</strong>的权限系统：追踪 <code>codex/codex-rs/core/src/tools/orchestrator.rs</code> — 审批 → 沙箱 → 执行 → 重试管道是任何开源 agent 中最完整的安全架构。</li>
+  <li>如果你想了解<strong>最实用</strong>的 ACL 模式：阅读 <code>claude-code/src/tools.ts</code> — 三过滤器管道（上下文 → deny 规则 → 合并）干净且可直接应用于新的 agent 框架。</li>
+  <li>如果你想了解<strong>最优雅</strong>的类型级方法：研究 <code>opencode/packages/core/src/tool/registry.ts</code> — 物化时过滤意味着类型系统阻止 LLM 看见被 deny 的工具。</li>
+</ul>
+
+<div class="callout">
+  <strong>有问题可以追问。</strong> 如果本课中有任何不清楚的地方，或者你想深入了解某个特定代码库的权限模型，可以向你的 agent 老师提问。所有代码库已克隆并索引在 <code>/home/shared/agent-study/repos/</code>。
+</div>
+
+<div class="nav">
+  <span><a href="0003-context-management.html">&larr; 第3课：上下文管理</a></span>
+  <span><a href="0005-agent-loop-in-depth.html">第5课：Agent 循环深入 &rarr;</a></span>
+</div>
+
+<script src="../../assets/lang-switcher.js"></script>
+</body>
+</html>

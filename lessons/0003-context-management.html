@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+b+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0003: Context Management</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  .spectrum { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0; padding: 0.8rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.82rem; }
+  .spectrum .left { font-weight: 600; }
+  .spectrum .right { font-weight: 600; }
+  .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="#" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>Lesson 0003: Context Management</h1>
+<p class="subtitle">How AI agents manage their context window — compaction, token budgets, and the tree model.</p>
+<p class="meta">June 2026 · 7 primary source codebases · <a href="0003-context-management.html">Permalink</a></p>
+
+<p class="sidenote">The context window is every agent's <strong>hardest resource constraint</strong>. Too little context and the agent forgets what it was doing. Too much and the LLM gets slow, expensive, and confused. Every codebase solves this differently, but they all face the same problem: how to keep what matters and drop what doesn't.</p>
+
+<p>In <a href="0002-tool-system.html">Lesson 0002</a>, we covered tool definition through normalization. This lesson zooms into the <em>opposite</em> direction: how agents squeeze tool results and conversation history back down to fit the context window.</p>
+
+<h2>The four fundamental strategies</h2>
+
+<p>Across the seven codebases, four distinct compaction strategies emerge:</p>
+
+<div class="spectrum">
+  <span class="left">Proactive (before the call)</span>
+  <span class="bar"></span>
+  <span class="right">Reactive (after the error)</span>
+</div>
+
+<ol>
+  <li><strong>Proactive compaction (claude-code, hermes-agent):</strong> Check token count <em>before</em> every API call. If over threshold, compact first. The safest approach — the LLM never sees an overfull context.</li>
+  <li><strong>Reactive compaction (pi-mono, openclaw, hermes-agent):</strong> Wait for the provider to return a 413 prompt-too-long error, then compact and retry. Simpler to implement but wastes one API call.</li>
+  <li><strong>Per-turn consolidation (nanobot):</strong> Run a lightweight consolidation check every turn; if needed, run up to 5 rounds of summarization before proceeding.</li>
+  <li><strong>Delegate-to-provider (opencode, codex):</strong> Leave compaction to an external package (<code>@opencode-ai/core</code>) or configurable shell hooks. No built-in LLM summarizer.</li>
+</ol>
+
+<h2>The most sophisticated: claude-code's 7-layer approach</h2>
+
+<p>Claude Code has the most elaborate context management of all seven codebases. Seven distinct layers work together:</p>
+
+<h3>Layer 1: Token budget (gatekeeper)</h3>
+
+<p>Before every API call, <code>src/query/tokenBudget.ts</code> checks whether the conversation fits. The threshold is 90% of the context window (<code>COMPLETION_THRESHOLD = 0.9</code>). It also detects <strong>diminishing returns</strong>: if 3 or more continuations each add less than 500 tokens of new content, the system forces a compaction — the conversation is spinning without progress.</p>
+
+<p>The diminishing-returns heuristic is subtle but important. Without it, an agent that keeps making tiny edits to the same file would never trigger compaction by token count alone — each turn adds little. But across 10+ turns, the context fills with near-duplicate tool results. The heuristic catches this pattern: "you're not adding meaningful new information, so compact now."</p>
+
+<pre><code>// src/query/tokenBudget.ts — threshold and diminishing-returns check
+const COMPLETION_THRESHOLD = 0.9;
+
+function isDiminishingReturns(continuations: Continuation[]): boolean {
+  return continuations.length >= 3 &&
+    continuations.slice(-3).every(c => c.tokenDelta < 500);
+}</code></pre>
+
+<h3>Layer 2: Context window resolution</h3>
+
+<p><code>src/utils/context.ts</code> — <code>getContextWindowForModel()</code> resolves the active model's context window. It checks for the <code>[1m]</code> suffix (denoting million-token models), consults model capabilities, and defaults to 200K tokens. This is the foundation that all other layers reference.</p>
+
+<h3>Layer 3: Token counting</h3>
+
+<p><code>src/utils/tokens.ts</code> — <code>tokenCountWithEstimation()</code> walks backward from the last known API usage point. Everything after that is estimated rather than precisely counted. This gives a fast, reasonably accurate count without re-counting everything from scratch.</p>
+
+<h3>Layer 4: Auto-compact (proactive)</h3>
+
+<p><code>src/query.ts:454</code> — before every API call, the system checks the token threshold. If exceeded, it calls <code>buildPostCompactMessages()</code> which runs summarization and produces a compacted conversation. This is the primary compaction path.</p>
+
+<h3>Layer 5: Reactive compact</h3>
+
+<p><code>src/services/compact/reactiveCompact.ts</code> — if auto-compact somehow misses the trigger (race condition, unexpected token surge), the reactive layer catches 413 prompt-too-long errors. It runs a single-shot compaction and retries. There's no retry loop — if reactive compaction fails to reduce enough, the error propagates.</p>
+
+<h3>Layer 6: Micro-compact</h3>
+
+<p><code>src/services/compact/microCompact.ts</code> — before the main compaction runs, micro-compact collapses identical consecutive tool results. If a tool was called 5 times with the same result, only 1 entry is kept. This often reduces token count enough to avoid full summarization.</p>
+
+<h3>Layer 7: Context collapse, session memory, and snip</h3>
+
+<p>Three specialized compaction types:</p>
+<ul>
+  <li><strong>Context collapse</strong> (<code>src/services/contextCollapse/</code>): produces a projected read-time view using a commit-log model — each collapse is a "commit" of the state, and the LLM sees a summary rather than raw history.</li>
+  <li><strong>Session memory compact</strong> (<code>src/services/compact/sessionMemoryCompact.ts</code>): experimental, uses session memory data for a higher-quality summary.</li>
+  <li><strong>Snip compact</strong> (<code>src/query.ts:401</code>): removes hidden or intentionally-snipped message content before the conversation is sent.</li>
+</ul>
+
+<h3>System prompt composition</h3>
+
+<p><code>src/utils/systemPrompt.ts</code> — <code>buildEffectiveSystemPrompt()</code> merges prompts from 5 sources in priority order: <code>override > coordinator > agent > custom > default</code>. Each layer can add, override, or remove sections. This isn't compaction per se, but it controls the fixed token overhead at the top of every conversation.</p>
+
+<p>Why this matters: the system prompt is fixed overhead that sits at the top of every API call. A 10K token system prompt on a 200K window with 90% threshold leaves only 170K for actual conversation — the system prompt consumes 5% of the available budget permanently. Layered composition with overrides lets different agent modes (coordinator, sub-agent, standalone) tune this overhead.</p>
+
+<h2>The session-tree model (pi-mono, openclaw)</h2>
+
+<p>pi-mono and openclaw share a fundamentally different data model: history is a <strong>tree</strong> of typed entries, not a flat array.</p>
+
+<pre><code>// Simplified tree structure
+type SessionEntry =
+  | { type: 'message', role, content }
+  | { type: 'compaction', summary, entriesCompacted }
+  | { type: 'branch_summary', branchId, summary }
+
+// buildSessionContext() walks the tree → flat message list
+// beforeBranch → ... → compaction → afterCompaction → ... → current</code></pre>
+
+<p>Key properties of this model:</p>
+<ul>
+  <li><strong>Compaction is recorded, not destructive:</strong> compacted entries remain in the tree. They're just not included in the active context. You can "uncompact" if needed.</li>
+  <li><strong><code>CompactionSettings</code></strong>: <code>{ enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 }</code> — always preserves room for the LLM response and the most recent turns.</li>
+  <li><strong>Split-turn compaction:</strong> when the token cut point falls in the middle of a tool-call turn (some tools returned, some didn't), both the prefix and suffix of that turn are summarized separately. The model never sees a half-finished tool cycle.</li>
+  <li><strong>File operation tracking:</strong> file operations (reads, writes, edits) are tracked across sessions and appended to compaction entries, giving the summary awareness of which files were touched.</li>
+  <li><strong>Iterative summary updates:</strong> <code>UPDATE_SUMMARIZATION_PROMPT</code> merges new messages into an existing summary rather than re-summarizing from scratch. This is cheaper and preserves continuity.</li>
+</ul>
+
+<h2>The 3-layer memory context (hermes-agent)</h2>
+
+<p>Hermes-agent combines three sources into a single context:</p>
+
+<pre><code>┌─────────────┐  ┌──────────┐  ┌──────────────┐
+│  MEMORY.md   │  │ USER.md  │  │  SQLite FTS5 │
+│  (project)   │  │  (user)  │  │  (search)    │
+└──────┬───────┘  └────┬─────┘  └──────┬───────┘
+       └───────────────┼───────────────┘
+                       ▼
+              ContextCompressor
+</code></pre>
+
+<p>The <code>ContextCompressor</code> at <code>agent/context_compressor.py</code> runs a 5-phase algorithm:</p>
+
+<div class="diagram">
+┌─────────┐    ┌─────────────┐    ┌──────────────┐    ┌─────────────┐    ┌──────────────┐
+│  PHASE 1 │ →  │   PHASE 2   │ →  │   PHASE 3    │ →  │   PHASE 4   │ →  │   PHASE 5    │
+│  Prune   │    │  Boundaries │    │ Prior Summary │    │  LLM Summary │    │   Assemble   │
+│          │    │             │    │               │    │              │    │              │
+│ Trim     │    │ Which msgs  │    │ Update vs.    │    │ Generate     │    │ prefix +     │
+│ verbose  │    │ stay raw    │    │ re-create     │    │ concise      │    │ summary +    │
+│ tool out │    │ vs. summary │    │ summary       │    │ summary      │    │ recent msgs  │
+└─────────┘    └─────────────┘    └──────────────┘    └─────────────┘    └──────────────┘
+</div>
+
+<ol>
+  <li><strong>Prune tool results:</strong> trim verbose tool output before anything else. This is the cheapest reduction and often sufficient on its own.</li>
+  <li><strong>Determine boundaries:</strong> find the cut point — which messages stay as raw text and which get summarized.</li>
+  <li><strong>Search for prior summary:</strong> if a summary already exists, retrieve it so the compressor can <em>update</em> rather than re-create.</li>
+  <li><strong>Generate LLM summary:</strong> call the LLM to produce a concise summary of the pruned entries.</li>
+  <li><strong>Assemble:</strong> combine system prompt + summary (reference-only prefix) + recent messages into the final context.</li>
+</ol>
+
+<p>Key heuristics in hermes-agent's approach:</p>
+
+<ul>
+  <li><strong>Anti-thrashing:</strong> <code>should_compress()</code> skips compaction if the last 2 compressions each saved less than 10% of tokens. Compaction has a cost — if it's not paying off, stop doing it.</li>
+  <li><strong>Reference-only prefix:</strong> the summary is prefixed with explicit instructions that it is <em>background information</em>, not active instructions. This prevents the model from treating stale summaries as commands.</li>
+  <li><strong>Fallback deterministic summary:</strong> if the LLM summarization call fails, the compressor falls back to a rules-based summary (extract first sentence of each message, cap at 8K chars).</li>
+  <li><strong>Preflight compression:</strong> runs <em>before</em> the tool loop starts, not during. Up to 3 passes. This means the agent never starts a turn with an overfull context.</li>
+</ul>
+
+<h2>File reference system with hard limits (hermes-agent)</h2>
+
+<p>Hermes-agent's <code>@reference</code> system supports <code>@file:</code>, <code>@folder:</code>, <code>@git:</code>, and <code>@url:</code> directives. References expand to their content, but subject to a <strong>50% context window hard limit</strong> — no reference can consume more than half the available context. This prevents a single large file from crowding out conversation history.</p>
+
+<p>The 50% limit is not arbitrary. It guarantees that conversation history always has at least as much room as injected references, which means the model can always "think about" the injected content with equal-weight history context. A 90% limit would let references dominate; a 20% limit would make references too small to be useful for large files. 50% is the balanced split.</p>
+
+<p>The <code>@folder:</code> directive is the most dangerous of the four — recursively expanding a directory tree can pull in thousands of files. Hermes-agent handles this by expanding entries with file-size estimates first, sorting by relevance (using the FTS5 index), and stopping when the 50% budget is exhausted.</p>
+
+<h2>The explicit state machine (nanobot)</h2>
+
+<p>Nanobot makes context management a first-class state in its turn loop:</p>
+
+<pre><code>// nanobot/agent/loop.py — TurnState enum
+RESTORE → COMPACT → COMMAND → BUILD → RUN → SAVE → RESPOND → DONE</code></pre>
+
+<p>Each component has a clear role:</p>
+
+<ul>
+  <li><strong><code>AutoCompact</code></strong> (<code>nanobot/agent/autocompact.py</code>): idle-session TTL-based archiving. If a session has been idle, it keeps the last 8 messages and summarizes the rest. This is orthogonal to per-turn consolidation — it handles the case where the user walks away and comes back hours later.</li>
+  <li><strong><code>Consolidator</code></strong> (<code>nanobot/agent/memory.py</code>): <code>maybe_consolidate_by_tokens()</code> runs per-turn. If the context exceeds the budget, it runs up to 5 consolidation rounds, each round calling the LLM to compress the oldest uncompressed messages. The multi-round design handles the case where a single summarization pass doesn't reduce enough — it keeps going until the context fits.</li>
+  <li><strong><code>ContextBuilder</code></strong> (<code>nanobot/agent/context.py</code>): assembles the final context in this order: identity → bootstrap files → tool contract → memory → skills → history (capped at 120 messages) → session summary. The order matters: identity and tool contract are fixed overhead; history is the most volatile and the first thing to get capped or summarized.</li>
+</ul>
+
+<h2>Hook-driven and delegate-based approaches</h2>
+
+<p>Two codebases take a fundamentally different approach — they don't implement compaction themselves:</p>
+
+<p><strong>codex (hook-driven):</strong> Compaction is driven by configurable hooks in <code>codex-rs/hooks/src/events/compact.rs</code>. The <code>PreCompactRequest</code> and <code>PostCompactRequest</code> structs carry context about what to compact and what was compacted. The actual summarization is done by <em>user-configured shell commands</em> — codex has no built-in LLM summarizer. Context fragments are delimited by typed markers so the hook scripts can identify sections.</p>
+
+<p>This design is philosophically consistent with codex's approach to sandboxing (Lesson 0002): the framework provides the <em>event</em> and the <em>contract</em>, but the policy is entirely user-defined. A <code>PostCompactRequest</code> carries the compacted result and the token counts before/after, letting the hook decide whether to accept or redo the compaction.</p>
+
+<p><strong>opencode (delegate):</strong> Compaction is delegated entirely to the external <code>@opencode-ai/core</code> package and to the provider level. OpenCode itself doesn't run summaries — it relies on the provider's native context handling. This keeps the OpenCode codebase small, but means compaction behavior is opaque and non-portable across providers.</p>
+
+<p>The tradeoff is clear: codex and opencode have <em>zero lines of summarization code</em> to maintain, debug, or security-review. But they also have zero control over summarization quality. If the hook script or provider produces a bad summary, there's no fallback and no recourse.</p>
+
+<h2>Why the tree model matters</h2>
+
+<p>The difference between a flat array and a tree is not just a data structure choice — it determines what operations are possible:</p>
+
+<table>
+  <tr><th>Operation</th><th>Flat array (claude-code, hermes-agent, nanobot)</th><th>Tree (pi-mono, openclaw)</th></tr>
+  <tr><td><strong>Undo compaction</strong></td><td>Must keep old array copy or re-request</td><td>Change which nodes are "active" — no data loss</td></tr>
+  <tr><td><strong>Branch from mid-conversation</strong></td><td>Copy the array up to that point</td><td>Add a new branch node — O(1)</td></tr>
+  <tr><td><strong>Merge branches</strong></td><td>Manual reconciliation of two arrays</td><td>Walk both subtrees, produce merged summary node</td></tr>
+  <tr><td><strong>Re-summarize with different granularity</strong></td><td>Can't — the original messages are gone</td><td>Delete old compaction node, create new one from preserved children</td></tr>
+</table>
+
+<p>pi-mono and openclaw chose the tree model primarily to support branching — the same conversation can fork into multiple directions. But the secondary benefit (undoable, redoable compaction) turned out to be just as valuable.</p>
+
+<h2>Comparative table</h2>
+
+<table>
+  <tr><th>Dimension</th><th>claude-code</th><th>pi-mono</th><th>openclaw</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th></tr>
+  <tr><td><strong>Compaction type</strong></td><td>Proactive + Reactive</td><td>Reactive</td><td>Reactive</td><td>Proactive (preflight) + Reactive</td><td>Proactive (per-turn)</td><td>Hook (shell cmds)</td><td>Delegate (provider)</td></tr>
+  <tr><td><strong>Summarization model</strong></td><td>LLM (internal)</td><td>LLM (internal)</td><td>LLM (internal)</td><td>LLM + fallback rules</td><td>LLM (multi-round)</td><td>None (external)</td><td>None (delegated)</td></tr>
+  <tr><td><strong>Token estimation</strong></td><td>Walk-back from last API call</td><td>Provider-reported + est</td><td>Provider-reported + est</td><td>tiktoken + estimation</td><td>tiktoken + estimation</td><td>tiktoken</td><td>Provider</td></tr>
+  <tr><td><strong>History model</strong></td><td>Flat array + commit-log collapses</td><td>Tree (typed entries)</td><td>Tree (typed entries)</td><td>Flat array</td><td>Flat array (capped 120)</td><td>Flat array (typed markers)</td><td>Flat array</td></tr>
+  <tr><td><strong>Tail protection</strong></td><td>Reserve tokens + auto-compact threshold</td><td>keepRecentTokens: 20000</td><td>keepRecentTokens: 20000</td><td>Anti-thrashing (10% floor)</td><td>Keep last 8 messages</td><td>Hook-defined</td><td>Provider-defined</td></tr>
+  <tr><td><strong>Unique feature</strong></td><td>7-layer system + diminishing-returns detection</td><td>Split-turn compaction</td><td>Iterative summary updates</td><td>Reference-only prefix + FTS5</td><td>5-round consolidation</td><td>Fully configurable hooks</td><td>Zero compaction code</td></tr>
+</table>
+
+<h2>Design heuristics</h2>
+
+<p>Patterns that hold across the codebases:</p>
+
+<div class="callout">
+  <strong>If you control the context window size, proactive is better than reactive.</strong> Claude Code and hermes-agent both check tokens before calling the LLM. This avoids wasted API calls and gives the user a smoother experience. Reactive only makes sense when the provider controls the window and you can't predict where the limit is.
+</div>
+
+<div class="callout">
+  <strong>If you have multiple context sources, the tree model is cleaner than flat arrays.</strong> pi-mono's session tree stores messages, compactions, and branch summaries as typed nodes. This makes it trivial to reconstruct context for any point in the session, undo compactions, or fork branches. Flat arrays force you to mutate or duplicate history.
+</div>
+
+<div class="callout">
+  <strong>User files (MEMORY.md, USER.md) must be "reference-only" in summaries.</strong> Hermes-agent's reference-only prefix is a critical safety measure: compacted MEMORY.md content should inform the model but never override the user's current instructions. Blending memory into the system prompt without this distinction causes the agent to follow stale directives.
+</div>
+
+<div class="callout">
+  <strong>Tool output pruning before LLM summarization significantly reduces compaction costs.</strong> Every codebase that does compaction prunes tool outputs first. Hermes-agent's phase 1 (prune) and claude-code's micro-compact both do this. LLM summarization is expensive — trimming verbose tool output first pays for itself immediately.
+</div>
+
+<h2>What happens when compaction fails?</h2>
+
+<p>Every compaction system can fail — the LLM summarizer returns garbage, the token count doesn't drop enough, or a bug corrupts the summary. How each codebase handles this:</p>
+
+<ul>
+  <li><strong>claude-code:</strong> if reactive compaction fails to reduce context below the limit, the error propagates to the user. The single-shot design means there's no infinite retry loop.</li>
+  <li><strong>hermes-agent:</strong> the deterministic fallback summary (8K chars, rule-based extraction) guarantees <em>some</em> summary is produced even if the LLM is down. The anti-thrashing check also prevents the compressor from burning tokens on ineffective compactions.</li>
+  <li><strong>pi-mono / openclaw:</strong> if the LLM summarization fails, the compaction entry is not created and the original messages stay in the tree. The agent proceeds with an overfull context — which may trigger a provider 413 error on the next call, but at least the data is preserved.</li>
+  <li><strong>nanobot:</strong> the multi-round consolidation (up to 5 rounds) provides a natural backstop. If after 5 rounds the context still doesn't fit, the oldest messages are <em>truncated</em> (not summarized) as a last resort.</li>
+  <li><strong>codex:</strong> hook scripts control failure handling entirely. The <code>PostCompactRequest</code> carries before/after token counts — a well-written hook can detect insufficient reduction and retry with different parameters.</li>
+  <li><strong>opencode:</strong> failure handling is entirely the provider's responsibility. If the provider's compaction fails, the agent simply stops working.</li>
+</ul>
+
+<h2>Quiz</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>Quiz</h3>
+
+  <div class="question">Q1. What threshold does claude-code use to trigger proactive auto-compact before each API call?</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">80% of context window</div>
+    <div class="option" data-q="1" data-a="b">85% of context window</div>
+    <div class="option" data-q="1" data-a="c">90% of context window</div>
+    <div class="option" data-q="1" data-a="d">95% of context window</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. What is hermes-agent's anti-thrashing rule for compaction?</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">Skip if last compaction saved less than 20%</div>
+    <div class="option" data-q="2" data-a="b">Skip if last 2 compactions each saved less than 10%</div>
+    <div class="option" data-q="2" data-a="c">Skip if any compaction takes longer than 5 seconds</div>
+    <div class="option" data-q="2" data-a="d">Always compact — never skip</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. How does pi-mono handle the case where the token cut point falls in the middle of a tool-call turn?</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">It drops the incomplete turn entirely</div>
+    <div class="option" data-q="3" data-a="b">It waits for the turn to finish before compacting</div>
+    <div class="option" data-q="3" data-a="c">It summarizes the prefix and suffix separately (split-turn compaction)</div>
+    <div class="option" data-q="3" data-a="d">It moves the cut point to the nearest turn boundary</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'c', 2: 'b', 3: 'c' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = 'Correct.';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = 'Not quite — re-read the relevant section above.';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>What we haven't covered</h2>
+<ul>
+  <li><strong>Streaming token accounting</strong> — how tokens are counted during active streaming, and the interaction between streaming and compaction triggers.</li>
+  <li><strong>Multi-agent context sharing</strong> — how sub-agents inherit or share context from parent agents (covered in <a href="0008-subagent-architecture.html">Lesson 0008</a>).</li>
+  <li><strong>Image and attachment context</strong> — how non-text content (images, PDFs, binary attachments) consumes context window budget.</li>
+  <li><strong>Cross-session memory</strong> — how context persists <em>across</em> sessions (covered in <a href="0006-memory-systems.html">Lesson 0006</a>).</li>
+</ul>
+
+<h2>Primary sources</h2>
+<ol>
+  <li><strong>claude-code</strong>: <code>src/query.ts:454</code> (auto-compact trigger), <code>src/query.ts:401</code> (snip compact), <code>src/query/tokenBudget.ts</code> (COMPLETION_THRESHOLD = 0.9, diminishing returns), <code>src/services/compact/reactiveCompact.ts</code>, <code>src/services/compact/microCompact.ts</code>, <code>src/services/compact/sessionMemoryCompact.ts</code>, <code>src/services/contextCollapse/</code> (commit-log model), <code>src/utils/context.ts</code> (getContextWindowForModel), <code>src/utils/tokens.ts</code> (tokenCountWithEstimation), <code>src/utils/systemPrompt.ts</code> (buildEffectiveSystemPrompt)</li>
+  <li><strong>pi-mono</strong>: <code>packages/agent/src/session-tree.ts</code> (typed entries, tree model), <code>compaction.ts</code> (CompactionSettings, split-turn compaction, UPDATE_SUMMARIZATION_PROMPT), <code>buildSessionContext()</code></li>
+  <li><strong>openclaw</strong>: <code>packages/agent-core/src/session-tree.ts</code> (same tree model as pi-mono), <code>compaction.ts</code> (CompactionSettings, file operation tracking)</li>
+  <li><strong>hermes-agent</strong>: <code>agent/context_compressor.py</code> (5-phase algorithm, should_compress anti-thrashing, reference-only prefix, fallback deterministic summary, preflight compression), <code>agent/references.py</code> (@file/@folder/@git/@url system, 50% hard limit), <code>config.py</code> (MEMORY.md, USER.md paths)</li>
+  <li><strong>nanobot</strong>: <code>nanobot/agent/loop.py</code> (TurnState enum — RESTORE→COMPACT→...→DONE), <code>nanobot/agent/autocompact.py</code> (AutoCompact, TTL-based, keep last 8), <code>nanobot/agent/memory.py</code> (Consolidator.maybe_consolidate_by_tokens, 5 rounds), <code>nanobot/agent/context.py</code> (ContextBuilder assembly order)</li>
+  <li><strong>codex</strong>: <code>codex-rs/hooks/src/events/compact.rs</code> (PreCompactRequest, PostCompactRequest, hook-driven, typed markers)</li>
+  <li><strong>opencode</strong>: <code>packages/core/src/</code> (delegates to @opencode-ai/core, provider-level compaction)</li>
+</ol>
+
+<h2>Recommended next reading</h2>
+<ul>
+  <li>If you want the <strong>most sophisticated</strong> compaction system: trace <code>claude-code/src/services/compact/</code> — the 7-layer interplay between auto, reactive, micro, context collapse, session memory, snip, and token budget.</li>
+  <li>If you want the <strong>most elegant data model</strong>: read <code>pi-mono/packages/agent/src/session-tree.ts</code> — the typed-entry tree model with split-turn compaction is a cleaner foundation than flat arrays.</li>
+  <li>If you want the <strong>most practical heuristics</strong>: study <code>hermes-agent/agent/context_compressor.py</code> — the anti-thrashing rule, reference-only prefix, and fallback summary are individually adoptable patterns.</li>
+</ul>
+
+<div class="callout">
+  <strong>Ask followup questions.</strong> If anything in this lesson is unclear, or you want to go deeper on a specific codebase's context management, ask your agent teacher. The codebases are all cloned and indexed at <code>/home/shared/agent-study/repos/</code>.
+</div>
+
+<div class="nav">
+  <span><a href="0002-tool-system.html">&larr; Lesson 0002: Tool System</a></span>
+  <span><a href="0004-permission-model.html">Lesson 0004: Permission Model &rarr;</a></span>
+</div>
+
+<script src="../assets/lang-switcher.js"></script>
+</body>
+</html>

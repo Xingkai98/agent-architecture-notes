@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0007: UI / Transport Layers — TUI, client/server, multi-channel</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  .spectrum { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0; padding: 0.8rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.82rem; }
+  .spectrum .left { font-weight: 600; }
+  .spectrum .right { font-weight: 600; }
+  .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #5a5a5a, #4a90d9, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="#" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>Lesson 0007: UI / Transport Layers</h1>
+<p class="subtitle">TUI frameworks, client/server splits, and multi-channel adapters — how agents talk to the world.</p>
+<p class="meta">June 2026 · 7 primary source codebases · <a href="0007-ui-transport.html">Permalink</a></p>
+
+<p class="sidenote">Every agent needs a surface. For some that surface is a terminal (<strong>Claude Code</strong>, <strong>Pi-mono</strong>, <strong>Codex</strong>, <strong>Opencode</strong>). For others it is a messaging app (<strong>OpenClaw</strong> with 24 channels, <strong>Nanobot</strong> with 18). For still others it is a desktop app or API server. The choice of transport layer shapes everything above it: how tools render results, how streaming works, how errors surface to the user.</p>
+
+<p>In <a href="0002-tool-system.html">Lesson 0002</a>, we saw how tools are defined, registered, dispatched, and normalized. This lesson moves one layer up: <em>how those tool results reach the user</em>, and how the user's input reaches the agent. We'll survey the full interface paradigm spectrum, compare six TUI implementations in detail, examine client/server architectures, and map the multi-channel landscape.</p>
+
+<h2>The interface paradigm spectrum</h2>
+
+<p>Agents expose themselves to users along a spectrum of increasing complexity and reach:</p>
+
+<div class="spectrum">
+  <span class="left">REPL/TUI</span>
+  <span class="bar"></span>
+  <span class="right">API</span>
+</div>
+
+<ol>
+  <li><strong>REPL / TUI:</strong> The agent is a terminal application. The user types, the agent responds, the loop is visible. Claude Code, Pi-mono, Codex, and Opencode all live here. This is the dominant paradigm for developer-facing agents.</li>
+  <li><strong>CLI one-shot:</strong> The agent runs a single turn and exits. Input comes from args or stdin, output goes to stdout. Useful for scripting and CI. Codex and Pi-mono both support this mode.</li>
+  <li><strong>Daemon:</strong> The agent runs as a long-lived process, often headless. Codex's <code>app-server</code> and OpenClaw's gateway both operate this way — the agent process is separate from the interface.</li>
+  <li><strong>Multi-channel:</strong> One agent, many surfaces. OpenClaw (24 channels) and Nanobot (18 channels) are the exemplars here. A single agent loop can receive input from Telegram, Discord, Slack, Feishu, and Matrix simultaneously.</li>
+  <li><strong>API:</strong> The agent exposes an HTTP endpoint (often OpenAI-compatible <code>/v1/chat/completions</code>). Nanobot's <code>api/server.py</code> is the clearest example — a thin aiohttp wrapper that lets any HTTP client drive the agent.</li>
+</ol>
+
+<h2>TUI technologies compared</h2>
+
+<p>Six codebases implement terminal UIs, but they make radically different technology choices. The framework selection is not just an implementation detail — it determines how streaming output renders, how scrolling works, how key bindings are defined, and how much maintenance burden the project carries.</p>
+
+<h3>Claude Code: Custom React + Ink fork</h3>
+
+<p>Claude Code's TUI is built on a custom fork of Ink (React for terminals). The fork lives at <code>src/ink/</code> with a 251KB <code>ink.tsx</code> that includes a custom fiber reconciler and terminal layout engine. The two largest components — <code>Messages.tsx</code> (147KB) and <code>VirtualMessageList.tsx</code> (148KB) — show how much UI logic a terminal agent accumulates. Virtual scrolling is mandatory: agent conversations produce hundreds of messages, and naively rendering them all would overwhelm the terminal.</p>
+
+<p class="sidenote">The Ink fork is a multi-year commitment. Claude Code can't simply upgrade to upstream Ink — the fork diverged to support custom layout, virtual scrolling, and streaming tool rendering. This is the cost of the "TUI as application" philosophy.</p>
+
+<h3>Codex: ratatui + crossterm</h3>
+
+<p>Codex uses Rust-native terminal libraries: <code>ratatui</code> for widget-based rendering and <code>crossterm</code> for terminal control. The main TUI lives at <code>codex-rs/tui/src/tui.rs</code> and <code>app.rs</code> (58KB). Ratatui provides a retained-mode widget tree with layout constraints — a different paradigm from React's declarative diffing. Crossterm handles raw mode, cursor control, and input events.</p>
+
+<h3>Pi-mono: Custom TUI from scratch</h3>
+
+<p>Pi-mono's TUI at <code>packages/tui/src/tui.ts</code> (53KB) has zero framework dependencies. It implements components from scratch: <code>box</code>, <code>editor</code>, <code>image</code>, <code>input</code>, <code>loader</code>, and <code>markdown</code>. No Ink, no ratatui, no prompt_toolkit — just raw ANSI escapes and terminal IO. This gives maximal control and minimal bloat, at the cost of reimplementing every widget behavior.</p>
+
+<h3>Hermes-agent: prompt_toolkit</h3>
+
+<p>Hermes-agent uses Python's <code>prompt_toolkit</code> in <code>cli.py</code>, composing <code>Application</code>, <code>Layout</code>, <code>TextArea</code>, and <code>KeyBindings</code>. Prompt_toolkit provides a mature widget system with syntax highlighting, auto-completion, and key binding DSL out of the box — no need to build from scratch.</p>
+
+<h3>Opencode: OpenTUI + Solid.js</h3>
+
+<p>Opencode's TUI at <code>packages/tui/src/app.tsx</code> (36KB) is built on OpenTUI with Solid.js for reactive rendering. This is a novel combination: terminal UI with fine-grained reactive JSX. Solid's signal-based reactivity means only changed parts of the terminal output re-render, without a virtual DOM.</p>
+
+<h3>Nanobot: prompt_toolkit + rich</h3>
+
+<p>Nanobot combines <code>prompt_toolkit</code> for the interactive CLI with <code>rich</code> for formatted output in <code>cli/commands.py</code> (67KB). Rich provides tables, panels, syntax-highlighted code blocks, and markdown rendering — all styled for terminal output.</p>
+
+<pre><code># Hermes-agent: prompt_toolkit composition
+# cli.py assembles the TUI from prompt_toolkit primitives:
+from prompt_toolkit import Application
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.key_binding import KeyBindings
+
+# Contrast with Pi-mono: everything below TextArea/KeyBindings
+# is implemented from scratch at packages/tui/src/tui.ts (53KB)</code></pre>
+
+<table>
+  <tr><th>Codebase</th><th>TUI Library</th><th>Language</th><th>Key File(s)</th><th>Rendering Paradigm</th></tr>
+  <tr><td>Claude Code</td><td>Custom Ink fork (React)</td><td>TypeScript</td><td>src/ink/ink.tsx (251KB), Messages.tsx (147KB), VirtualMessageList.tsx (148KB)</td><td>Declarative JSX + Virtual DOM diff</td></tr>
+  <tr><td>Codex</td><td>ratatui + crossterm</td><td>Rust</td><td>codex-rs/tui/src/tui.rs, app.rs (58KB)</td><td>Retained-mode widget tree</td></tr>
+  <tr><td>Pi-mono</td><td>Custom (from scratch)</td><td>TypeScript</td><td>packages/tui/src/tui.ts (53KB)</td><td>Imperative component rendering</td></tr>
+  <tr><td>Hermes-agent</td><td>prompt_toolkit</td><td>Python</td><td>cli.py</td><td>Widget composition + key bindings</td></tr>
+  <tr><td>Opencode</td><td>OpenTUI + Solid.js</td><td>TypeScript</td><td>packages/tui/src/app.tsx (36KB)</td><td>Reactive JSX (signals, no vDOM)</td></tr>
+  <tr><td>Nanobot</td><td>prompt_toolkit + rich</td><td>Python</td><td>cli/commands.py (67KB)</td><td>Prompt loop + rich formatting</td></tr>
+</table>
+
+<h2>Client/Server splits</h2>
+
+<p>Three codebases separate the agent process from the UI process — a design choice that enables remote operation, headless deployment, and multiple frontends:</p>
+
+<h3>Opencode: Web Worker server + RPC + TUI client</h3>
+
+<p>Opencode runs the agent core in a Web Worker, communicating with the TUI client via RPC. The TUI can connect to a local worker (in-process) or a remote server over HTTP. This means the same agent can drive a terminal UI, a web UI, or an IDE plugin — all through the same RPC interface.</p>
+
+<h3>Codex: App Server + TUI client</h3>
+
+<p>Codex splits into <code>app-server/</code> (the agent process) and <code>app-server-client/</code> (the TUI). The two can run in-process (zero network overhead) or the TUI can connect to a remote app-server over HTTP. This is the same pattern as a language server: the server does the work, the client handles display.</p>
+
+<h3>OpenClaw: Gateway protocol</h3>
+
+<p>OpenClaw defines a formal gateway protocol at <code>packages/gateway-protocol/</code> with a corresponding <code>gateway-client/</code> package. The protocol specifies message formats, authentication, and transport — any client that speaks the protocol can drive the agent. This is a step beyond Codex's ad-hoc client/server split: the protocol is versioned, documented, and reusable.</p>
+
+<h2>Multi-channel (messaging bots)</h2>
+
+<p>Two codebases go far beyond terminal UIs — they are messaging platforms first, agents second:</p>
+
+<h3>OpenClaw: 24 channels</h3>
+
+<p>OpenClaw supports 24 channels: Discord, Slack, Telegram, Feishu, Matrix, WhatsApp, Signal, IRC, iMessage, LINE, Zalo, and more. Channels are registered declaratively in each extension's <code>package.json</code>. The channel plugin contract standardizes adapters for: configuration, authentication, outbound message sending, connection status, device pairing, and security policies. Build-time channel discovery generates <code>dist/channel-catalog.json</code> — a manifest of all available channels without runtime scanning.</p>
+
+<p class="sidenote">The key architectural insight: each channel is an adapter, not an agent. There is one agent loop. Messages from all channels route through a unified message bus. The agent does not know or care which channel a message came from.</p>
+
+<h3>Nanobot: 18 channels</h3>
+
+<p>Nanobot supports 18 channels with substantial per-channel implementations: Telegram (64KB), Feishu (78KB), Discord (33KB), Slack (30KB), Signal (55KB), Matrix (43KB), Weixin (63KB), and more. All channels follow the <code>BaseChannel</code> ABC with three core methods: <code>start()</code>, <code>stop()</code>, and <code>send()</code>. A message bus handles pub/sub routing between channels and the agent core.</p>
+
+<pre><code># Nanobot channel contract (conceptual): every channel implements these three
+class BaseChannel(ABC):
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+    async def send(self, target, message) -> None: ...
+
+# Each channel is an adapter — the agent loop never imports Telegram or Discord.
+# Messages arrive on the bus as a normalized type; the bus routes them to the agent.
+# Responses go back through the bus; the channel adapter formats them for its platform.</code></pre>
+
+<h3>Hermes-agent: Desktop + CLI</h3>
+
+<p>Hermes-agent takes a different approach: a desktop Electron app at <code>apps/desktop/</code> built with React + Vite, plus a <code>cli.py</code> for terminal use. The desktop app provides a graphical chat interface while the CLI serves scripting and power users. This is the only codebase in the set that ships a GUI.</p>
+
+<h2>Single-interface agents</h2>
+
+<p>Four codebases commit to a single interface — no channels, no desktop app, no API server:</p>
+
+<ul>
+  <li><strong>Claude Code:</strong> Terminal-only (React+Ink). Supports structured IO for IDE integration (VS Code, JetBrains) but the agent itself is a terminal application.</li>
+  <li><strong>Pi-mono:</strong> Terminal-only (custom TUI). No API, no channels, no desktop. The terminal is the entire product surface.</li>
+  <li><strong>Codex:</strong> Terminal-only (ratatui) with a remote control daemon. The daemon enables headless operation, but user interaction is through the TUI.</li>
+  <li><strong>Opencode:</strong> Terminal-only (OpenTUI). The Web Worker architecture allows a web UI, but the primary interface is the terminal.</li>
+</ul>
+
+<h2>Interesting design choices</h2>
+
+<p>Four implementation details worth studying:</p>
+
+<p><strong>Claude Code's Ink fork:</strong> The TUI IS the application. <code>Messages.tsx</code> at 147KB is not a "view layer" — it is the core user experience. Tool results, streaming text, permissions prompts, and mode indicators all render through React components. The fork exists because no off-the-shelf terminal UI library handles streaming agent conversations at this scale.</p>
+
+<p><strong>Pi-mono's from-scratch TUI:</strong> At 53KB with zero dependencies, Pi-mono's TUI is a statement. No framework churn, no upgrade treadmill, no breaking changes from upstream. The cost is that every feature — syntax highlighting, scrollback, resize handling — must be built and maintained. For a project that values minimalism, this tradeoff makes sense.</p>
+
+<p><strong>OpenClaw's channel catalog:</strong> <code>dist/channel-catalog.json</code> is generated at build time from extension manifests. This means the agent knows its available channels before starting — no runtime scanning, no dynamic imports, no race conditions. It is a small touch that eliminates an entire class of startup bugs.</p>
+
+<p><strong>Nanobot's OpenAI-compatible API server:</strong> <code>api/server.py</code> is a thin aiohttp wrapper that exposes <code>/v1/chat/completions</code>. This means any tool that can call the OpenAI API — langchain, openai-python, curl — can drive Nanobot without knowing it is not talking to OpenAI. The agent becomes a drop-in replacement.</p>
+
+<h2>Comparative table</h2>
+
+<table>
+  <tr><th>Codebase</th><th>Interface Paradigm</th><th>TUI Library</th><th>Client/Server Split</th><th>Multi-Channel</th><th>Rendering Approach</th></tr>
+  <tr><td>Claude Code</td><td>REPL/TUI + structured IO</td><td>Custom Ink fork (React)</td><td>No (monolith)</td><td>No</td><td>Virtual DOM diff with virtual scrolling</td></tr>
+  <tr><td>Pi-mono</td><td>REPL/TUI</td><td>Custom (from scratch, 53KB)</td><td>No (monolith)</td><td>No</td><td>Imperative component rendering</td></tr>
+  <tr><td>Codex</td><td>TUI + Daemon</td><td>ratatui + crossterm</td><td>Yes (app-server + client)</td><td>No</td><td>Retained-mode widget tree</td></tr>
+  <tr><td>Hermes-agent</td><td>TUI + Desktop GUI</td><td>prompt_toolkit</td><td>No (monolith)</td><td>No</td><td>Widget composition</td></tr>
+  <tr><td>Opencode</td><td>TUI + Web-capable</td><td>OpenTUI + Solid.js</td><td>Yes (Worker + RPC + HTTP)</td><td>No</td><td>Reactive JSX (signals)</td></tr>
+  <tr><td>Nanobot</td><td>TUI + Multi-channel + API</td><td>prompt_toolkit + rich</td><td>No (monolith)</td><td>Yes (18 channels)</td><td>Prompt loop + rich formatting</td></tr>
+  <tr><td>OpenClaw</td><td>Daemon + Multi-channel</td><td>None (headless gateway)</td><td>Yes (gateway protocol)</td><td>Yes (24 channels)</td><td>N/A (message bus output)</td></tr>
+</table>
+
+<h2>Design heuristics</h2>
+
+<div class="callout">
+  <strong>Heuristic 1:</strong> Terminal agents need virtual scrolling — messages grow unbounded. Claude Code's VirtualMessageList (148KB) exists because naive rendering of 500+ messages freezes the terminal. Every TUI agent hits this eventually, regardless of framework.
+</div>
+
+<div class="callout">
+  <strong>Heuristic 2:</strong> Multi-channel agents need a unified message bus — each channel is an adapter, not an agent. OpenClaw and Nanobot both converge on this pattern independently. The agent loop processes one message type; channel adapters translate to and from it. Don't write an agent per channel.
+</div>
+
+<div class="callout">
+  <strong>Heuristic 3:</strong> The TUI framework choice is a multi-year commitment — custom forks give control but cost maintenance. Claude Code's Ink fork can't track upstream. Pi-mono's from-scratch TUI needs every widget built by hand. Ratatui upgrades require Rust refactors. Choose the surface of your maintenance burden carefully.
+</div>
+
+<h2>Exercise: Classify the transport layer</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>Quiz</h3>
+
+  <div class="question">Q1. Which codebase uses a custom fork of Ink (React for terminals) with a 251KB ink.tsx core?</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">Opencode</div>
+    <div class="option" data-q="1" data-a="b">Claude Code</div>
+    <div class="option" data-q="1" data-a="c">Pi-mono</div>
+    <div class="option" data-q="1" data-a="d">Codex</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. How many channels does OpenClaw support, and how are they discovered at build time?</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">18 channels, discovered via pkgutil scanning</div>
+    <div class="option" data-q="2" data-a="b">24 channels, discovered via generated channel-catalog.json</div>
+    <div class="option" data-q="2" data-a="c">12 channels, discovered via entry_points</div>
+    <div class="option" data-q="2" data-a="d">24 channels, discovered via runtime import scanning</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. Which architectural pattern do both OpenClaw and Nanobot use to unify messages from multiple channels?</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">One agent loop per channel</div>
+    <div class="option" data-q="3" data-a="b">Channel-specific agent instances</div>
+    <div class="option" data-q="3" data-a="c">Unified message bus with channel adapters</div>
+    <div class="option" data-q="3" data-a="d">Webhook-based fan-in</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'b', 2: 'b', 3: 'c' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ Correct.';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ Not quite — re-read the relevant section above.';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>What we haven't covered</h2>
+<ul>
+  <li><strong>Web UI implementations</strong> — some codebases have web dashboards, but none were analyzed in depth as primary interfaces.</li>
+  <li><strong>Streaming protocols</strong> — how server-sent events, WebSockets, and chunked transfer encoding carry agent output to clients. Covered partially in <a href="0001-core-agent-loop.html">Lesson 0001</a> (streaming vs. batch).</li>
+  <li><strong>IDE integration details</strong> — how Claude Code's structured IO mode, Codex's VS Code extension, and Opencode's editor plugins work internally.</li>
+  <li><strong>Mobile interfaces</strong> — none of the seven codebases ship a mobile app, though messaging channels (Telegram, WhatsApp) provide de facto mobile access.</li>
+</ul>
+
+<h2>Primary sources</h2>
+<ol>
+  <li><strong>Claude Code</strong>: <code>src/ink/ink.tsx</code> (251KB custom Ink fork), <code>src/components/Messages.tsx</code> (147KB), <code>src/components/VirtualMessageList.tsx</code> (148KB)</li>
+  <li><strong>Codex</strong>: <code>codex-rs/tui/src/tui.rs</code>, <code>app.rs</code> (58KB), <code>app-server/</code>, <code>app-server-client/</code></li>
+  <li><strong>Pi-mono</strong>: <code>packages/tui/src/tui.ts</code> (53KB custom TUI), components: box, editor, image, input, loader, markdown</li>
+  <li><strong>Hermes-agent</strong>: <code>cli.py</code> (prompt_toolkit Application/Layout/TextArea/KeyBindings), <code>apps/desktop/</code> (React + Vite Electron app)</li>
+  <li><strong>Opencode</strong>: <code>packages/tui/src/app.tsx</code> (36KB, OpenTUI + Solid.js), Web Worker server + RPC architecture</li>
+  <li><strong>Nanobot</strong>: <code>cli/commands.py</code> (67KB, prompt_toolkit + rich), <code>api/server.py</code> (aiohttp OpenAI-compatible), 18 channel implementations</li>
+  <li><strong>OpenClaw</strong>: <code>packages/gateway-protocol/</code>, <code>gateway-client/</code>, 24 channel adapters, <code>dist/channel-catalog.json</code></li>
+</ol>
+
+<h2>Recommended next reading</h2>
+<ul>
+  <li>If you want to understand <strong>virtual scrolling</strong> for terminals: trace <code>Claude Code: src/components/VirtualMessageList.tsx</code> — the 148KB file is the definitive implementation of rendering only visible messages in a terminal.</li>
+  <li>If you want the <strong>cleanest multi-channel pattern</strong>: study <code>OpenClaw: packages/gateway-protocol/</code> — the protocol defines message formats, auth, and transport independent of any specific channel.</li>
+  <li>If you want the <strong>most practical TUI pattern</strong>: read <code>Pi-mono: packages/tui/src/tui.ts</code> — 53KB of from-scratch terminal rendering shows exactly what a TUI needs and nothing more.</li>
+  <li>If you want <strong>channel implementation depth</strong>: compare Nanobot's Feishu channel (78KB) with its Telegram channel (64KB) — two production-quality adapters with different authentication and event models.</li>
+</ul>
+
+<div class="callout">
+  <strong>Ask followup questions.</strong> If anything in this lesson is unclear, or you want to go deeper on a specific codebase's UI or transport layer, ask your agent teacher. The codebases are all cloned and indexed at <code>/home/shared/agent-study/repos/</code>.
+</div>
+
+<div class="nav">
+  <span><a href="0006-context-strategies.html">&larr; Lesson 0006: Context Strategies</a></span>
+  <span><a href="0008-loop-comparison.html">Lesson 0008: Loop Comparison &rarr;</a></span>
+</div>
+
+<script src="../assets/lang-switcher.js"></script>
+</body>
+</html>

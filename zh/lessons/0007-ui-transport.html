@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第7课：UI / 传输层 — TUI、客户端/服务端、多频道</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  .spectrum { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0; padding: 0.8rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.82rem; }
+  .spectrum .left { font-weight: 600; }
+  .spectrum .right { font-weight: 600; }
+  .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #5a5a5a, #4a90d9, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="../../lessons/0007-ui-transport.html" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>第7课：UI 与传输层</h1>
+<p class="subtitle">TUI 框架、客户端/服务端分离以及多频道适配器 —— agent 如何与外界对话。</p>
+<p class="meta">2026年6月 · 7 个主要源代码库 · <a href="0007-ui-transport.html">固定链接</a></p>
+
+<p class="sidenote">每个 agent 都需要一个界面。对某些 agent 来说，这个界面是终端（<strong>Claude Code</strong>、<strong>Pi-mono</strong>、<strong>Codex</strong>、<strong>Opencode</strong>）。对另一些来说，是消息应用（<strong>OpenClaw</strong> 支持 24 个频道，<strong>Nanobot</strong> 支持 18 个）。再其他的则是桌面应用或 API 服务器。传输层的选择塑造了其上的一切：工具如何渲染结果、流式传输如何工作、错误如何呈现给用户。</p>
+
+<p>在<a href="0002-tool-system.html">第2课</a>中，我们了解了工具是如何定义、注册、分发和规范化的。本课向上移动一层：<em>这些工具结果如何到达用户</em>，以及用户的输入如何到达 agent。我们将纵览完整的界面范式频谱，详细比较六种 TUI 实现，分析客户端/服务端架构，并描绘多频道领域的地图。</p>
+
+<h2>界面范式频谱</h2>
+
+<p>Agent 以不断增加的复杂性和覆盖范围向用户暴露自身：</p>
+
+<div class="spectrum">
+  <span class="left">REPL/TUI</span>
+  <span class="bar"></span>
+  <span class="right">API</span>
+</div>
+
+<ol>
+  <li><strong>REPL / TUI：</strong> Agent 是一个终端应用程序。用户输入，agent 响应，循环是可见的。Claude Code、Pi-mono、Codex 和 Opencode 都属于此类。这是面向开发者的 agent 的主导范式。</li>
+  <li><strong>CLI 单次执行：</strong> Agent 运行单轮并退出。输入来自参数或 stdin，输出到 stdout。适用于脚本和 CI。Codex 和 Pi-mono 都支持此模式。</li>
+  <li><strong>Daemon：</strong> Agent 作为长期运行的进程，通常无头运行。Codex 的 <code>app-server</code> 和 OpenClaw 的 gateway 都以这种方式运作——agent 进程与界面分离。</li>
+  <li><strong>Multi-channel（多频道）：</strong> 一个 agent，多个界面。OpenClaw（24 个频道）和 Nanobot（18 个频道）是此类的典范。单个 agent 循环可以同时接收来自 Telegram、Discord、Slack、飞书和 Matrix 的输入。</li>
+  <li><strong>API：</strong> Agent 暴露一个 HTTP 端点（通常兼容 OpenAI <code>/v1/chat/completions</code>）。Nanobot 的 <code>api/server.py</code> 是最清晰的示例——一个薄的 aiohttp 封装，允许任何 HTTP 客户端驱动 agent。</li>
+</ol>
+
+<h2>TUI 技术对比</h2>
+
+<p>六个代码库实现了终端 UI，但它们在技术选择上截然不同。框架的选择不仅仅是实现细节——它决定了流式输出如何渲染、滚动如何工作、按键绑定如何定义，以及项目承担了多少维护负担。</p>
+
+<h3>Claude Code：自定义 React + Ink fork</h3>
+
+<p>Claude Code 的 TUI 建立在 Ink（React 的终端版本）的自定义 fork 之上。该 fork 位于 <code>src/ink/</code>，包含一个 251KB 的 <code>ink.tsx</code>，包括自定义 fiber reconciler 和终端布局引擎。两个最大的组件——<code>Messages.tsx</code>（147KB）和 <code>VirtualMessageList.tsx</code>（148KB）——展示了一个终端 agent 积累了多么庞大的 UI 逻辑。虚拟滚动是必需的：agent 对话产生数百条消息，朴素地渲染所有消息会使终端不堪重负。</p>
+
+<p class="sidenote">Ink fork 是一个多年的承诺。Claude Code 无法简单升级到上游 Ink——该 fork 为了支持自定义布局、虚拟滚动和流式工具渲染而产生了分歧。这是"TUI 即应用"理念的代价。</p>
+
+<h3>Codex：ratatui + crossterm</h3>
+
+<p>Codex 使用 Rust 原生终端库：<code>ratatui</code> 用于基于 widget 的渲染，<code>crossterm</code> 用于终端控制。主 TUI 位于 <code>codex-rs/tui/src/tui.rs</code> 和 <code>app.rs</code>（58KB）。Ratatui 提供保留模式的 widget 树和布局约束——这是一种不同于 React 声明式 diffing 的范式。Crossterm 处理原始模式、光标控制和输入事件。</p>
+
+<h3>Pi-mono：从零开始的自定义 TUI</h3>
+
+<p>Pi-mono 在 <code>packages/tui/src/tui.ts</code>（53KB）中的 TUI 共有零个框架依赖。它从零开始实现组件：<code>box</code>、<code>editor</code>、<code>image</code>、<code>input</code>、<code>loader</code> 和 <code>markdown</code>。没有 Ink、没有 ratatui、没有 prompt_toolkit——只有原始的 ANSI 转义序列和终端 IO。这给出了最大的控制和最小的膨胀，但代价是需要重新实现每个 widget 行为。</p>
+
+<h3>Hermes-agent：prompt_toolkit</h3>
+
+<p>Hermes-agent 在 <code>cli.py</code> 中使用 Python 的 <code>prompt_toolkit</code>，组合了 <code>Application</code>、<code>Layout</code>、<code>TextArea</code> 和 <code>KeyBindings</code>。Prompt_toolkit 开箱即用地提供了成熟的 widget 系统，支持语法高亮、自动补全和按键绑定 DSL——无需从零开始构建。</p>
+
+<h3>Opencode：OpenTUI + Solid.js</h3>
+
+<p>Opencode 在 <code>packages/tui/src/app.tsx</code>（36KB）中的 TUI 建立在 OpenTUI 之上，配合 Solid.js 实现响应式渲染。这是一种新颖的组合：终端 UI 配合细粒度响应式 JSX。Solid 基于信号（signal）的响应式意味着终端输出只有变化的部分会重新渲染，无需虚拟 DOM。</p>
+
+<h3>Nanobot：prompt_toolkit + rich</h3>
+
+<p>Nanobot 在 <code>cli/commands.py</code>（67KB）中将 <code>prompt_toolkit</code> 用于交互式 CLI，配合 <code>rich</code> 进行格式化输出。Rich 提供表格、面板、语法高亮代码块和 markdown 渲染——全部针对终端输出样式设计。</p>
+
+<pre><code># Hermes-agent: prompt_toolkit 组合
+# cli.py 从 prompt_toolkit 原语组装 TUI：
+from prompt_toolkit import Application
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.key_binding import KeyBindings
+
+# 与 Pi-mono 对比：TextArea/KeyBindings 以下的所有内容
+# 都在 packages/tui/src/tui.ts（53KB）中从零实现</code></pre>
+
+<table>
+  <tr><th>代码库</th><th>TUI 库</th><th>语言</th><th>关键文件</th><th>渲染范式</th></tr>
+  <tr><td>Claude Code</td><td>自定义 Ink fork（React）</td><td>TypeScript</td><td>src/ink/ink.tsx（251KB）、Messages.tsx（147KB）、VirtualMessageList.tsx（148KB）</td><td>声明式 JSX + Virtual DOM diff</td></tr>
+  <tr><td>Codex</td><td>ratatui + crossterm</td><td>Rust</td><td>codex-rs/tui/src/tui.rs、app.rs（58KB）</td><td>保留模式 widget 树</td></tr>
+  <tr><td>Pi-mono</td><td>自定义（从零开始）</td><td>TypeScript</td><td>packages/tui/src/tui.ts（53KB）</td><td>命令式组件渲染</td></tr>
+  <tr><td>Hermes-agent</td><td>prompt_toolkit</td><td>Python</td><td>cli.py</td><td>Widget 组合 + 按键绑定</td></tr>
+  <tr><td>Opencode</td><td>OpenTUI + Solid.js</td><td>TypeScript</td><td>packages/tui/src/app.tsx（36KB）</td><td>响应式 JSX（signals，无 vDOM）</td></tr>
+  <tr><td>Nanobot</td><td>prompt_toolkit + rich</td><td>Python</td><td>cli/commands.py（67KB）</td><td>Prompt 循环 + rich 格式化</td></tr>
+</table>
+
+<h2>客户端/服务端分离</h2>
+
+<p>三个代码库将 agent 进程与 UI 进程分离——这一设计选择使得远程操作、无头部署和多前端成为可能：</p>
+
+<h3>Opencode：Web Worker 服务端 + RPC + TUI 客户端</h3>
+
+<p>Opencode 在 Web Worker 中运行 agent 核心，通过 RPC 与 TUI 客户端通信。TUI 可以连接到本地 worker（进程内）或远程服务器（通过 HTTP）。这意味着同一个 agent 可以驱动终端 UI、Web UI 或 IDE 插件——全部通过相同的 RPC 接口。</p>
+
+<h3>Codex：App Server + TUI 客户端</h3>
+
+<p>Codex 分为 <code>app-server/</code>（agent 进程）和 <code>app-server-client/</code>（TUI）。两者可以在进程内运行（零网络开销），也可以让 TUI 通过 HTTP 连接到远程 app-server。这与 language server 的模式相同：服务器做工作，客户端处理显示。</p>
+
+<h3>OpenClaw：Gateway 协议</h3>
+
+<p>OpenClaw 在 <code>packages/gateway-protocol/</code> 中定义了一个正式的 gateway 协议，并配有对应的 <code>gateway-client/</code> 包。该协议规定了消息格式、认证和传输——任何能够使用该协议的客户端都可以驱动 agent。这比 Codex 的即兴客户端/服务端分离更进一步：协议是版本化的、文档化的和可复用的。</p>
+
+<h2>Multi-channel（消息机器人）</h2>
+
+<p>两个代码库远远超越了终端 UI——它们首先是消息平台，其次才是 agent：</p>
+
+<h3>OpenClaw：24 个频道</h3>
+
+<p>OpenClaw 支持 24 个频道：Discord、Slack、Telegram、飞书、Matrix、WhatsApp、Signal、IRC、iMessage、LINE、Zalo 等。频道在每个扩展的 <code>package.json</code> 中声明式注册。频道插件合约为以下方面标准化了适配器：配置、认证、出站消息发送、连接状态、设备配对和安全策略。构建时的频道发现会生成 <code>dist/channel-catalog.json</code>——一份所有可用频道的清单，无需运行时扫描。</p>
+
+<p class="sidenote">关键的架构洞察：每个频道是一个适配器，而非一个 agent。只有一个 agent 循环。来自所有频道的消息通过统一的消息总线路由。agent 不知道也不关心消息来自哪个频道。</p>
+
+<h3>Nanobot：18 个频道</h3>
+
+<p>Nanobot 支持 18 个频道，每个都有可观的实现：Telegram（64KB）、飞书（78KB）、Discord（33KB）、Slack（30KB）、Signal（55KB）、Matrix（43KB）、微信（63KB）等。所有频道遵循带有三个核心方法的 <code>BaseChannel</code> ABC：<code>start()</code>、<code>stop()</code> 和 <code>send()</code>。消息总线处理频道与 agent 核心之间的发布/订阅路由。</p>
+
+<pre><code># Nanobot 频道合约（概念性的）：每个频道实现这三个方法
+class BaseChannel(ABC):
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+    async def send(self, target, message) -> None: ...
+
+# 每个频道是适配器——agent 循环从不导入 Telegram 或 Discord。
+# 消息以标准化类型到达总线；总线将其路由到 agent。
+# 响应通过总线返回；频道适配器为其平台格式化它们。</code></pre>
+
+<h3>Hermes-agent：桌面 + CLI</h3>
+
+<p>Hermes-agent 采取了不同的方法：一个桌面 Electron 应用位于 <code>apps/desktop/</code>，使用 React + Vite 构建，加上一个 <code>cli.py</code> 用于终端使用。桌面应用提供图形化聊天界面，而 CLI 服务于脚本和高级用户。这是整个集合中唯一提供 GUI 的代码库。</p>
+
+<h2>单一界面 agent</h2>
+
+<p>四个代码库坚持使用单一界面——没有频道、没有桌面应用、没有 API 服务器：</p>
+
+<ul>
+  <li><strong>Claude Code：</strong> 仅终端（React+Ink）。支持结构化 IO 用于 IDE 集成（VS Code、JetBrains），但 agent 本身是一个终端应用。</li>
+  <li><strong>Pi-mono：</strong> 仅终端（自定义 TUI）。无 API、无频道、无桌面。终端是全部产品界面。</li>
+  <li><strong>Codex：</strong> 仅终端（ratatui）配合远程控制 daemon。daemon 支持无头操作，但用户交互通过 TUI 进行。</li>
+  <li><strong>Opencode：</strong> 仅终端（OpenTUI）。Web Worker 架构允许 Web UI，但主要界面是终端。</li>
+</ul>
+
+<h2>值得关注的设计选择</h2>
+
+<p>四个值得研究的实现细节：</p>
+
+<p><strong>Claude Code 的 Ink fork：</strong> TUI 就是应用程序本身。<code>Messages.tsx</code> 的 147KB 不是一个"视图层"——它是核心用户体验。工具结果、流式文本、权限提示和模式指示器全部通过 React 组件渲染。该 fork 的存在是因为没有现成的终端 UI 库能以这种规模处理流式 agent 对话。</p>
+
+<p><strong>Pi-mono 的从零开始 TUI：</strong> 仅 53KB 且零依赖，Pi-mono 的 TUI 是一种声明。没有框架变动，没有升级跑步机，没有来自上游的破坏性变更。代价是每个功能——语法高亮、回滚、调整大小处理——都必须自行构建和维护。对于重视极简主义的项目，这种权衡是有意义的。</p>
+
+<p><strong>OpenClaw 的频道目录：</strong> <code>dist/channel-catalog.json</code> 在构建时从扩展清单生成。这意味着 agent 在启动前就知道其可用的频道——无需运行时扫描、无动态导入、无竞争条件。这是一个小小的细节，却消除了一整类启动错误。</p>
+
+<p><strong>Nanobot 的 OpenAI 兼容 API 服务器：</strong> <code>api/server.py</code> 是一个薄的 aiohttp 封装，暴露了 <code>/v1/chat/completions</code>。这意味着任何可以调用 OpenAI API 的工具——langchain、openai-python、curl——都可以驱动 Nanobot，而不需要知道它不是在跟 OpenAI 对话。agent 成为了一个可直接替换的替代方案。</p>
+
+<h2>对比表格</h2>
+
+<table>
+  <tr><th>代码库</th><th>界面范式</th><th>TUI 库</th><th>客户端/服务端分离</th><th>多频道</th><th>渲染方法</th></tr>
+  <tr><td>Claude Code</td><td>REPL/TUI + 结构化 IO</td><td>自定义 Ink fork（React）</td><td>否（单体）</td><td>否</td><td>Virtual DOM diff 配合虚拟滚动</td></tr>
+  <tr><td>Pi-mono</td><td>REPL/TUI</td><td>自定义（从零开始，53KB）</td><td>否（单体）</td><td>否</td><td>命令式组件渲染</td></tr>
+  <tr><td>Codex</td><td>TUI + Daemon</td><td>ratatui + crossterm</td><td>是（app-server + client）</td><td>否</td><td>保留模式 widget 树</td></tr>
+  <tr><td>Hermes-agent</td><td>TUI + 桌面 GUI</td><td>prompt_toolkit</td><td>否（单体）</td><td>否</td><td>Widget 组合</td></tr>
+  <tr><td>Opencode</td><td>TUI + 支持 Web</td><td>OpenTUI + Solid.js</td><td>是（Worker + RPC + HTTP）</td><td>否</td><td>响应式 JSX（signals）</td></tr>
+  <tr><td>Nanobot</td><td>TUI + 多频道 + API</td><td>prompt_toolkit + rich</td><td>否（单体）</td><td>是（18 个频道）</td><td>Prompt 循环 + rich 格式化</td></tr>
+  <tr><td>OpenClaw</td><td>Daemon + 多频道</td><td>无（无头 gateway）</td><td>是（gateway protocol）</td><td>是（24 个频道）</td><td>N/A（消息总线输出）</td></tr>
+</table>
+
+<h2>设计启发</h2>
+
+<div class="callout">
+  <strong>启发 1：</strong> 终端 agent 需要虚拟滚动——消息无限增长。Claude Code 的 VirtualMessageList（148KB）存在的原因是朴素渲染 500+ 条消息会使终端冻结。每个 TUI agent 最终都会遇到这个问题，无论使用什么框架。
+</div>
+
+<div class="callout">
+  <strong>启发 2：</strong> 多频道 agent 需要统一的消息总线——每个频道是适配器，而非 agent。OpenClaw 和 Nanobot 都独立地收敛到这个模式。agent 循环处理一种消息类型；频道适配器在它与平台之间进行转换。不要为每个频道编写一个 agent。
+</div>
+
+<div class="callout">
+  <strong>启发 3：</strong> TUI 框架的选择是多年的承诺——自定义 fork 给你控制权但消耗维护成本。Claude Code 的 Ink fork 无法跟踪上游。Pi-mono 的从零开始 TUI 需要手工构建每个 widget。Ratatui 升级需要 Rust 重构。请仔细选择你维护负担的界面。
+</div>
+
+<h2>练习：分类传输层</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>测验</h3>
+
+  <div class="question">Q1. 哪个代码库使用了 Ink（React 终端版）的自定义 fork，其核心 ink.tsx 有 251KB？</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">Opencode</div>
+    <div class="option" data-q="1" data-a="b">Claude Code</div>
+    <div class="option" data-q="1" data-a="c">Pi-mono</div>
+    <div class="option" data-q="1" data-a="d">Codex</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. OpenClaw 支持多少个频道，它们如何在构建时被发现？</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">18 个频道，通过 pkgutil 扫描发现</div>
+    <div class="option" data-q="2" data-a="b">24 个频道，通过生成的 channel-catalog.json 发现</div>
+    <div class="option" data-q="2" data-a="c">12 个频道，通过 entry_points 发现</div>
+    <div class="option" data-q="2" data-a="d">24 个频道，通过运行时 import 扫描发现</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. OpenClaw 和 Nanobot 都使用哪种架构模式来统一来自多个频道的消息？</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">每个频道一个 agent 循环</div>
+    <div class="option" data-q="3" data-a="b">每个频道独立的 agent 实例</div>
+    <div class="option" data-q="3" data-a="c">统一消息总线配合频道适配器</div>
+    <div class="option" data-q="3" data-a="d">基于 webhook 的扇入</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'b', 2: 'b', 3: 'c' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ 正确。';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ 不对——请重新阅读上面相关部分。';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>我们没有涵盖的内容</h2>
+<ul>
+  <li><strong>Web UI 实现</strong> —— 一些代码库有 Web 仪表板，但没有作为主要界面进行深入分析。</li>
+  <li><strong>流式传输协议</strong> —— server-sent events、WebSocket 和 chunked transfer encoding 如何将 agent 输出传输给客户端。部分涵盖在<a href="0001-core-agent-loop.html">第1课</a>（流式 vs. 批处理）。</li>
+  <li><strong>IDE 集成细节</strong> —— Claude Code 的结构化 IO 模式、Codex 的 VS Code 扩展和 Opencode 的编辑器插件内部如何工作。</li>
+  <li><strong>移动界面</strong> —— 七个代码库都没有发布移动应用，尽管消息频道（Telegram、WhatsApp）提供了事实上的移动访问。</li>
+</ul>
+
+<h2>主要来源</h2>
+<ol>
+  <li><strong>Claude Code</strong>：<code>src/ink/ink.tsx</code>（251KB 自定义 Ink fork）、<code>src/components/Messages.tsx</code>（147KB）、<code>src/components/VirtualMessageList.tsx</code>（148KB）</li>
+  <li><strong>Codex</strong>：<code>codex-rs/tui/src/tui.rs</code>、<code>app.rs</code>（58KB）、<code>app-server/</code>、<code>app-server-client/</code></li>
+  <li><strong>Pi-mono</strong>：<code>packages/tui/src/tui.ts</code>（53KB 自定义 TUI）、组件：box、editor、image、input、loader、markdown</li>
+  <li><strong>Hermes-agent</strong>：<code>cli.py</code>（prompt_toolkit Application/Layout/TextArea/KeyBindings）、<code>apps/desktop/</code>（React + Vite Electron 应用）</li>
+  <li><strong>Opencode</strong>：<code>packages/tui/src/app.tsx</code>（36KB、OpenTUI + Solid.js）、Web Worker 服务端 + RPC 架构</li>
+  <li><strong>Nanobot</strong>：<code>cli/commands.py</code>（67KB、prompt_toolkit + rich）、<code>api/server.py</code>（aiohttp OpenAI 兼容）、18 个频道实现</li>
+  <li><strong>OpenClaw</strong>：<code>packages/gateway-protocol/</code>、<code>gateway-client/</code>、24 个频道适配器、<code>dist/channel-catalog.json</code></li>
+</ol>
+
+<h2>推荐下一步阅读</h2>
+<ul>
+  <li>如果你想要了解终端的<strong>虚拟滚动</strong>：追踪 <code>Claude Code: src/components/VirtualMessageList.tsx</code> —— 这个 148KB 的文件是在终端中仅渲染可见消息的最终实现。</li>
+  <li>如果你想要<strong>最干净的多频道模式</strong>：研究 <code>OpenClaw: packages/gateway-protocol/</code> —— 该协议定义了独立于任何特定频道的消息格式、认证和传输。</li>
+  <li>如果你想要<strong>最实用的 TUI 模式</strong>：阅读 <code>Pi-mono: packages/tui/src/tui.ts</code> —— 53KB 从零开始的终端渲染精确展示了 TUI 需要什么而不多不少。</li>
+  <li>如果你想要<strong>频道实现深度</strong>：比较 Nanobot 的飞书频道（78KB）与其 Telegram 频道（64KB）——两个具有不同认证和事件模型的生产级适配器。</li>
+</ul>
+
+<div class="callout">
+  <strong>提出后续问题。</strong> 如果本课中有什么不清楚的地方，或者你想深入了解某个特定代码库的 UI 或传输层，请问你的 agent 老师。所有代码库已克隆并建立索引，位于 <code>/home/shared/agent-study/repos/</code>。
+</div>
+
+<div class="nav">
+  <span><a href="0006-context-strategies.html">&larr; 第6课：上下文策略</a></span>
+  <span><a href="0008-loop-comparison.html">第8课：循环对比 &rarr;</a></span>
+</div>
+
+<script src="../../assets/lang-switcher.js"></script>
+</body>
+</html>

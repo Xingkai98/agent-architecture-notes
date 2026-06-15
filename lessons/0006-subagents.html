@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0006: Sub-agents — spawn, isolate, delegate, collect</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  .spectrum { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0; padding: 0.8rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.82rem; }
+  .spectrum .left { font-weight: 600; }
+  .spectrum .right { font-weight: 600; }
+  .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #6f42c1, #0366d6, #28a745, #dc3545); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="#" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>Lesson 0006: Sub-agents</h1>
+<p class="subtitle">Spawn, isolate, delegate, collect — the four acts of every multi-agent system.</p>
+<p class="meta">June 2026 · 8 primary source codebases · <a href="0006-subagents.html">Permalink</a></p>
+
+<p class="sidenote">Every sub-agent system answers the same four questions: <strong>how</strong> is the child spawned, <strong>what</strong> can it see, <strong>how much</strong> can it spend, and <strong>how</strong> do results flow back to the parent. The differences between codebases are all in <em>where</em> they draw the isolation boundary and <em>how</em> they enforce it.</p>
+
+<p>In <a href="0002-tool-system.html">Lesson 0002</a>, we saw that tools are the engine of the agent loop. This lesson zooms out one level: <em>when one agent becomes many</em>. We'll trace sub-agent spawning, context isolation, resource budgeting, and result collection across all eight codebases, then extract the design heuristics that hold regardless of framework.</p>
+
+<h2>The spawn spectrum</h2>
+
+<p>Sub-agents exist on a continuum of isolation. The further right you go, the stronger the guarantee — and the higher the overhead:</p>
+
+<div class="spectrum">
+  <span class="left">In-process</span>
+  <span class="bar"></span>
+  <span class="right">Container</span>
+</div>
+
+<div class="diagram">
+In-process ─── Thread ─── Child process ─── Container
+   │               │             │               │
+   │               │             │               └─ Full OS isolation
+   │               │             └─ Process boundary, IPC
+   │               └─ Shared memory, GIL concerns
+   └─ Same heap, context object cloning
+</div>
+
+<p>No codebase in our set uses containers for ad-hoc sub-agents (though several use them for the host sandbox). The real battle is between in-process cloning and child-process spawning — and the choice shapes everything downstream.</p>
+
+<h2>Claude Code — in-process with context isolation</h2>
+
+<p>Claude Code's sub-agent system is the most sophisticated in-process design in our set. It spawns children within the same Node.js process but gives each an isolated <code>ToolUseContext</code> so they cannot accidentally mutate the parent's state.</p>
+
+<h3>Spawn: <code>runAgent()</code></h3>
+
+<p>At <code>src/tools/AgentTool/runAgent.ts:248</code>, <code>runAgent()</code> creates an isolated sub-agent by calling <code>createSubagentContext()</code>. The child gets its own conversation history, its own tool set, and its own abort signal — but it runs in the same event loop.</p>
+
+<pre><code>// claude-code: src/tools/AgentTool/runAgent.ts:248
+// runAgent() creates an isolated ToolUseContext for the child,
+// spawns the sub-agent conversation, and collects the result.
+// The parent blocks (sync mode) or continues (async mode).</code></pre>
+
+<h3>Context isolation: <code>createSubagentContext()</code></h3>
+
+<p>At <code>src/utils/forkedAgent.ts:345</code>, <code>createSubagentContext()</code> clones three critical pieces of state:</p>
+
+<ul>
+  <li><strong>readFileState</strong> — cloned so the child tracks its own file reads independently; the parent's readFileState is not polluted by child reads.</li>
+  <li><strong>AbortController</strong> — linked as a child controller, so cancelling the parent cancels all descendants.</li>
+  <li><strong>setAppState</strong> — replaced with a no-op for async sub-agents, since they cannot safely update shared UI state.</li>
+</ul>
+
+<h3>Three sub-agent modes</h3>
+
+<p>Claude Code supports three distinct sub-agent patterns:</p>
+
+<ol>
+  <li><strong>Synchronous (blocking):</strong> The parent pauses until the child completes. Used when the parent needs the child's answer to continue. This is the default <code>AgentTool</code> mode.</li>
+  <li><strong>Asynchronous (fire-and-forget):</strong> The parent dispatches the child and continues immediately. The child's result is delivered later via a callback or message bus. Used for parallel exploration tasks.</li>
+  <li><strong>Fork:</strong> At <code>src/tools/AgentTool/forkSubagent.ts:1</code>, the fork subagent inherits the parent's conversation context and uses a byte-identical API prefix. This allows the LLM provider to <em>share prompt cache entries</em> between parent and child — a significant cost optimization for deeply nested delegation.</li>
+</ol>
+
+<h3>Swarm mode</h3>
+
+<p>At <code>src/utils/swarm/backends/InProcessBackend.ts</code>, <code>TeammateExecutor</code> implements multi-agent orchestration using file-based mailboxes. Each agent writes to and reads from a designated file, creating an asynchronous message-passing system entirely within one process. The file system acts as a durable, inspectable message bus.</p>
+
+<h2>Hermes-agent — ThreadPoolExecutor with iteration budgets</h2>
+
+<p>Hermes-agent takes the thread-level approach: each sub-agent runs in a thread from a shared pool, with strict resource limits enforced by the framework.</p>
+
+<h3>Delegate tool</h3>
+
+<p>At <code>tools/delegate_tool.py</code>, <code>delegate_task()</code> is a first-class tool. It accepts:</p>
+
+<pre><code># hermes-agent: tools/delegate_tool.py
+def delegate_task(
+    goal: str,           # what the child must accomplish
+    context: str,        # relevant background for the child
+    toolset: list[str],  # which tools the child may use
+    role: str = "worker",# "worker" or "orchestrator"
+    max_concurrent_children: int | None = None
+) -> str:</code></pre>
+
+<h3>Iteration budgets</h3>
+
+<p>At <code>agent/iteration_budget.py</code>, every sub-agent receives its own <code>IterationBudget</code> (default 50 iterations). This is the key insight: <strong>budgets must be separate</strong>. A sub-agent that loops or explores excessively must not exhaust the parent's token allowance. When the budget is spent, the child is interrupted and its partial result is returned to the parent.</p>
+
+<h3>Child execution</h3>
+
+<p><code>_run_single_child()</code> creates a child <code>AIAgent</code> instance with:</p>
+
+<ul>
+  <li>A <strong>restricted toolset</strong> — only the tools the parent explicitly granted</li>
+  <li>An <strong>isolated task_id</strong> — the child's conversation is independently tracked</li>
+  <li>A <strong>focused system prompt</strong> — rewritten for the sub-task, not the parent's overall objective</li>
+</ul>
+
+<h3>Blocked tools for children</h3>
+
+<p>By default, children cannot use: <code>delegate_task</code> (prevent runaway recursion), <code>clarify</code> (children should resolve ambiguity independently), <code>memory</code> (memory is owned by the parent), <code>send_message</code> (only the parent communicates with the user), and <code>execute_code</code> (sandboxing concern).</p>
+
+<h3>Concurrency and nested delegation</h3>
+
+<p><code>max_concurrent_children</code> defaults to 3. Nested delegation is controlled by <code>role="orchestrator"</code> combined with <code>delegation.max_spawn_depth</code> — an orchestrator child can spawn its own workers, but the depth is capped. The subagent registry is thread-safe and supports <code>pause()</code>, <code>resume()</code>, <code>interrupt()</code>, and <code>list()</code> operations for full lifecycle management.</p>
+
+<h2>Pi-mono — child process model</h2>
+
+<p>Pi-mono takes the strongest isolation approach short of containers: each sub-agent is a separate OS process.</p>
+
+<h3>Subagent extension</h3>
+
+<p>At <code>packages/coding-agent/examples/extensions/subagent/index.ts</code>, the complete subagent extension is implemented as a standalone module. It demonstrates that sub-agents in pi-mono are <em>extensions</em>, not built into the framework core — the framework provides the spawn primitive (child_process), and the extension defines the delegation protocol.</p>
+
+<h3>Three execution modes</h3>
+
+<ol>
+  <li><strong>Single:</strong> Spawn one child, wait for completion, return the result.</li>
+  <li><strong>Parallel:</strong> Spawn up to 8 children with a concurrency limit of 4. Results are collected as they arrive. Failed children don't block siblings.</li>
+  <li><strong>Chain:</strong> Spawn children sequentially, each receiving the previous child's output via a <code>{previous}</code> placeholder in its prompt. Enables pipeline-style decomposition: "Find relevant files" → "Read those files" → "Summarize findings."</li>
+</ol>
+
+<h3>Process-level isolation</h3>
+
+<p><code>runSingleAgent()</code> uses <code>child_process.spawn()</code> with <code>--mode json</code> and <code>--no-session</code> flags. The child writes JSON lines to stdout; the parent reads them as a stream. Per-task output is capped at 50KB to prevent any single child from flooding the parent with data.</p>
+
+<pre><code>// pi-mono: subagent extension
+// child_process.spawn('agent', ['--mode', 'json', '--no-session'])
+// Child stdout → JSONL stream → parent collects → cap at 50KB</code></pre>
+
+<h2>Codex — multi-agent v2</h2>
+
+<p>Codex's multi-agent system is the most feature-complete in our set, with dedicated tools for every lifecycle operation.</p>
+
+<h3>Agent lifecycle tools</h3>
+
+<p>At <code>codex-rs/core/src/tools/handlers/multi_agents_v2.rs</code>, five tools form the complete lifecycle:</p>
+
+<table>
+  <tr><th>Tool</th><th>Purpose</th></tr>
+  <tr><td><code>spawn_agent</code></td><td>Create a new sub-agent with a task description</td></tr>
+  <tr><td><code>wait_for_agent</code></td><td>Block until a specific child completes, collect its result</td></tr>
+  <tr><td><code>send_message</code></td><td>Send a mid-execution message to a running child</td></tr>
+  <tr><td><code>interrupt_agent</code></td><td>Stop a running child and collect its partial result</td></tr>
+  <tr><td><code>list_agents</code></td><td>Enumerate all active children with their statuses</td></tr>
+</table>
+
+<h3>Spawn options</h3>
+
+<p>At <code>codex-rs/core/src/agent/control/spawn.rs:86</code>, <code>spawn_agent()</code> accepts <code>SpawnAgentOptions</code>:</p>
+
+<ul>
+  <li><strong>fork_context</strong> — whether the child inherits the parent's conversation</li>
+  <li><strong>fork_context_last_n_turns</strong> — how many recent turns to include (sliding window)</li>
+  <li><strong>max_threads</strong> — thread budget for the child's own parallel operations</li>
+</ul>
+
+<h3>Encrypted inter-agent communication</h3>
+
+<p>Codex uniquely encrypts all inter-agent messages via <code>InterAgentCommunication::new_encrypted()</code>. This is not a performance optimization — it is a security property: even within the same process, agents cannot inspect each other's messages without explicit permission. This matters when agents handle credentials or sensitive data.</p>
+
+<h2>Nanobot — asyncio.Tasks</h2>
+
+<p>Nanobot uses Python's native asyncio for lightweight, cooperative sub-agents within a single event loop.</p>
+
+<h3>Spawn and manage</h3>
+
+<p>At <code>nanobot/agent/subagent.py:74</code>, <code>SubagentManager.spawn()</code> creates an <code>asyncio.Task</code> — the lightest possible isolation unit. The task runs concurrently with the parent; the manager tracks its lifecycle.</p>
+
+<pre><code># nanobot: nanobot/agent/subagent.py:74
+class SubagentManager:
+    async def spawn(self, goal: str, tools: list[str]) -> str:
+        task = asyncio.create_task(self._run_child(goal, tools))
+        self._tasks.append(task)
+        return task_id</code></pre>
+
+<h3>Result delivery</h3>
+
+<p><code>_announce_result()</code> publishes the child's result via the message bus as a <code>subagent_result</code> injected event. The parent's context manager picks this up and injects it into the parent's conversation as if it were a tool result — the parent never sees the sub-agent as anything other than an async function call.</p>
+
+<h3>Status tracking</h3>
+
+<p>The <code>SubagentStatus</code> dataclass tracks phase transitions:</p>
+
+<pre><code># nanobot: subagent status phases
+initializing → awaiting_tools → tools_completed → final_response → done
+                                                              ↘ error</code></pre>
+
+<p>Concurrency is controlled by the <code>max_concurrent_subagents</code> config value.</p>
+
+<h2>Opencode — child sessions</h2>
+
+<p>Opencode models sub-agents as child sessions, reusing the same session machinery that powers the top-level agent.</p>
+
+<h3>TaskTool</h3>
+
+<p>At <code>packages/opencode/src/tool/task.ts</code>, the <code>TaskTool</code> creates a child session via <code>sessions.create()</code>. The child session is a fully independent agent conversation with its own context window, tool set, and abort controller — but it shares the same process and the same LLM connection.</p>
+
+<h3>Permission derivation</h3>
+
+<p>At <code>packages/opencode/src/agent/subagent-permissions.ts</code>, the child's permission ruleset is <em>derived</em> from the parent's. This is not a simple copy: the derivation function strips permissions that are meaningless for sub-agents (e.g., <code>allow_agent_spawn</code> if nesting is disabled) and adds restrictions (e.g., read-only file access for worker children).</p>
+
+<h3>Foreground vs. background</h3>
+
+<p>Opencode supports two execution modes directly analogous to Claude Code's sync/async split:</p>
+<ul>
+  <li><strong>Foreground (blocking):</strong> The parent waits for the child session to complete before continuing.</li>
+  <li><strong>Background (fire-and-forget):</strong> The child session runs independently; the parent can poll or be notified on completion.</li>
+</ul>
+
+<h2>OpenClaw — ACP-based delegation</h2>
+
+<p>OpenClaw uses the Agent Communication Protocol (ACP) as its delegation transport, making sub-agents addressable across process and network boundaries.</p>
+
+<h3>Spawn parameters</h3>
+
+<p>At <code>src/agents/acp-spawn.ts</code>, <code>SpawnAcpParams</code> defines the spawn contract:</p>
+
+<pre><code>// openclaw: src/agents/acp-spawn.ts
+interface SpawnAcpParams {
+  task: string;              // the sub-task description
+  agentId: string;           // which agent type to spawn
+  resumeSessionId?: string;  // resume an existing session
+  model?: string;            // model override for the child
+  thinking?: boolean;        // enable extended thinking
+  sandbox?: SandboxSpec;     // sandbox configuration
+  streamTo?: string;         // channel to stream results to
+}</code></pre>
+
+<h3>Multi-agent routing</h3>
+
+<p>OpenClaw's ACP layer provides 24 channels for inter-agent communication. Each agent subscribes to channels it cares about; the ACP router delivers messages by channel subscription, not by agent identity. This decoupling means agents can be added, removed, or replaced without reconfiguring the routing table.</p>
+
+<h2>Comparative table</h2>
+
+<table>
+  <tr><th>Codebase</th><th>Spawn Model</th><th>Context Isolation</th><th>Concurrency</th><th>Budget Model</th><th>Results Flow</th><th>Nesting</th></tr>
+  <tr><td><strong>claude-code</strong></td><td>In-process (forked context)</td><td>Cloned ToolUseContext</td><td>Sync + Async + Swarm</td><td>Shared (parent-managed)</td><td>Return value / callback</td><td>Yes (fork)</td></tr>
+  <tr><td><strong>hermes-agent</strong></td><td>ThreadPoolExecutor</td><td>New AIAgent instance</td><td>max_concurrent_children=3</td><td>Per-child IterationBudget (50)</td><td>Return value (blocking)</td><td>Yes (orchestrator role, max depth)</td></tr>
+  <tr><td><strong>pi-mono</strong></td><td>child_process.spawn()</td><td>OS process boundary</td><td>8 max, 4 concurrent</td><td>Per-task 50KB output cap</td><td>JSONL stdout stream</td><td>Yes (chain mode)</td></tr>
+  <tr><td><strong>codex</strong></td><td>In-process (agent control)</td><td>fork_context + encrypted comms</td><td>max_threads per child</td><td>Shared (sandbox-enforced)</td><td>wait_for_agent / send_message</td><td>Yes (nested spawn_agent)</td></tr>
+  <tr><td><strong>nanobot</strong></td><td>asyncio.Task</td><td>Message bus injection</td><td>max_concurrent_subagents</td><td>Event-loop cooperative</td><td>subagent_result event</td><td>Implicit (via spawn)</td></tr>
+  <tr><td><strong>opencode</strong></td><td>Child session (sessions.create)</td><td>Derived permission ruleset</td><td>Foreground + Background</td><td>Per-session context window</td><td>Session result</td><td>Configurable</td></tr>
+  <tr><td><strong>openclaw</strong></td><td>ACP spawn</td><td>ACP channel isolation</td><td>24 ACP channels</td><td>Per-agent model + thinking config</td><td>Channel subscription</td><td>Yes (ACP routing)</td></tr>
+</table>
+
+<h2>Design heuristics</h2>
+
+<div class="callout">
+  <strong>"Isolation is the defining dimension — what the sub-agent can SEE determines what it can DO."</strong><br>
+  Every design decision in a sub-agent system flows from the isolation boundary. In-process cloning (claude-code, codex) is fast and cache-friendly but requires disciplined context separation. Process spawning (pi-mono) is safe by construction but pays IPC overhead on every delegation. Thread pools (hermes-agent) sit in the middle — safe-enough with Python's GIL, but the isolation is conventional, not enforced by the OS.
+</div>
+
+<div class="callout">
+  <strong>"Budgets must be separate: a sub-agent shouldn't exhaust the parent's token allowance."</strong><br>
+  Hermes-agent's per-child IterationBudget is the cleanest expression of this principle. Nanobot achieves it implicitly through asyncio cooperative scheduling. Claude Code relies on the parent to manage budgets (via AbortController linkage). The key failure mode is the same across all codebases: an unconstrained sub-agent burns tokens exploring dead ends, and the parent has no recourse except timeout-killing the child.
+</div>
+
+<div class="callout">
+  <strong>"The fork pattern (claude-code, codex) trades isolation for cache efficiency."</strong><br>
+  When a child inherits the parent's conversation prefix (fork_context), the LLM provider can reuse cached key-value pairs from the parent's inference. This saves substantial API cost — but it means the child can "see" the parent's conversation. If the parent was discussing sensitive data, the child inherits that data in its context. Forking is an optimization, not a default — use it when cache savings outweigh isolation concerns.
+</div>
+
+<h2>Exercise: Sub-agent design decisions</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>Quiz</h3>
+
+  <div class="question">Q1. Which codebase uses child_process.spawn() with JSONL stdout streaming for sub-agent results?</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">claude-code</div>
+    <div class="option" data-q="1" data-a="b">hermes-agent</div>
+    <div class="option" data-q="1" data-a="c">pi-mono</div>
+    <div class="option" data-q="1" data-a="d">opencode</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. Which codebase uniquely encrypts all inter-agent messages even within the same process?</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">openclaw</div>
+    <div class="option" data-q="2" data-a="b">codex</div>
+    <div class="option" data-q="2" data-a="c">nanobot</div>
+    <div class="option" data-q="2" data-a="d">hermes-agent</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. What is the default iteration budget for a hermes-agent sub-agent?</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">25 iterations</div>
+    <div class="option" data-q="3" data-a="b">50 iterations</div>
+    <div class="option" data-q="3" data-a="c">100 iterations</div>
+    <div class="option" data-q="3" data-a="d">No default; parent must specify</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+
+  <div class="question">Q4. Which tools are blocked for sub-agents in hermes-agent?</div>
+  <div class="options">
+    <div class="option" data-q="4" data-a="a">read_file, write_file, bash</div>
+    <div class="option" data-q="4" data-a="b">delegate_task, clarify, memory, send_message, execute_code</div>
+    <div class="option" data-q="4" data-a="c">spawn_agent, wait_for_agent, list_agents</div>
+    <div class="option" data-q="4" data-a="d">web_search, web_fetch, browse</div>
+  </div>
+  <div class="feedback" id="feedback4"></div>
+</div>
+
+<script>
+(function() {
+  var answers = { 1: 'c', 2: 'b', 3: 'b', 4: 'b' };
+  document.querySelectorAll('.option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      var q = this.dataset.q;
+      var a = this.dataset.a;
+      var feedback = document.getElementById('feedback' + q);
+      var siblings = this.parentElement.querySelectorAll('.option');
+      siblings.forEach(function(s) { s.classList.remove('correct', 'wrong'); });
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        feedback.textContent = '✓ Correct.';
+        feedback.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        feedback.textContent = '✗ Not quite — re-read the relevant section above.';
+        feedback.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>What we haven't covered</h2>
+<ul>
+  <li><strong>Swarm orchestration in depth</strong> — multi-agent coordination patterns (voting, consensus, specialization) are covered in Lesson 0008.</li>
+  <li><strong>Sub-agent observability</strong> — tracing, logging, and debugging across agent boundaries are covered in <a href="0007-ui-transport.html">Lesson 0007</a>.</li>
+  <li><strong>Permission propagation</strong> — how parent permissions flow (or don't flow) to children is covered in <a href="0004-permission-model.html">Lesson 0004</a>.</li>
+  <li><strong>Sub-agent error recovery</strong> — retry strategies, partial result handling, and graceful degradation patterns.</li>
+</ul>
+
+<h2>Primary sources</h2>
+<ol>
+  <li><strong>claude-code</strong>: <code>src/tools/AgentTool/runAgent.ts:248</code> (runAgent), <code>src/utils/forkedAgent.ts:345</code> (createSubagentContext), <code>src/tools/AgentTool/forkSubagent.ts:1</code> (fork), <code>src/utils/swarm/backends/InProcessBackend.ts</code> (swarm)</li>
+  <li><strong>hermes-agent</strong>: <code>tools/delegate_tool.py</code> (delegate_task), <code>agent/iteration_budget.py</code> (IterationBudget), <code>_run_single_child()</code> (child execution), subagent registry</li>
+  <li><strong>pi-mono</strong>: <code>packages/coding-agent/examples/extensions/subagent/index.ts</code> (full subagent extension)</li>
+  <li><strong>codex</strong>: <code>codex-rs/core/src/tools/handlers/multi_agents_v2.rs</code> (lifecycle tools), <code>codex-rs/core/src/agent/control/spawn.rs:86</code> (spawn_agent)</li>
+  <li><strong>nanobot</strong>: <code>nanobot/agent/subagent.py:74</code> (SubagentManager.spawn), <code>_announce_result()</code>, <code>SubagentStatus</code> dataclass</li>
+  <li><strong>opencode</strong>: <code>packages/opencode/src/tool/task.ts</code> (TaskTool), <code>packages/opencode/src/agent/subagent-permissions.ts</code> (derived permissions)</li>
+  <li><strong>openclaw</strong>: <code>src/agents/acp-spawn.ts</code> (SpawnAcpParams), ACP channel routing</li>
+</ol>
+
+<h2>Recommended next reading</h2>
+<ul>
+  <li>If you want the <strong>most feature-complete</strong> multi-agent system: trace <code>codex/codex-rs/core/src/tools/handlers/multi_agents_v2.rs</code> — five lifecycle tools, encrypted comms, and sandbox integration.</li>
+  <li>If you want the <strong>cleanest budget model</strong>: read <code>hermes-agent/agent/iteration_budget.py</code> — the per-child iteration cap is the simplest, most effective guardrail in the set.</li>
+  <li>If you want the <strong>strongest isolation</strong>: study <code>pi-mono/packages/coding-agent/examples/extensions/subagent/index.ts</code> — child_process.spawn with JSONL streaming is portable, debuggable, and OS-enforced.</li>
+  <li>If you want the <strong>most practical</strong> pattern: <code>claude-code/src/tools/AgentTool/runAgent.ts</code> — the sync/async/fork trinity covers the vast majority of real-world delegation needs.</li>
+</ul>
+
+<div class="callout">
+  <strong>Ask followup questions.</strong> If anything in this lesson is unclear, or you want to go deeper on a specific codebase's sub-agent system, ask your agent teacher. The codebases are all cloned and indexed at <code>/home/shared/teach/agent-study/repos/</code>.
+</div>
+
+<div class="nav">
+  <span><a href="0002-tool-system.html">&larr; Lesson 0002: Tool System</a></span>
+  <span><a href="0007-ui-transport.html">Lesson 0007: UI &amp; Transport &rarr;</a></span>
+</div>
+
+<script src="../assets/lang-switcher.js"></script>
+</body>
+</html>
