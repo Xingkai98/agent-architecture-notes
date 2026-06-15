@@ -1,0 +1,3 @@
+.venv/
+podcast-scripts/episode-*.mp3
+podcast-scripts/tmp_segments/

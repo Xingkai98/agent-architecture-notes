@@ -1,0 +1,41 @@
+# Podcast generation configuration
+# Based on Podcastfy's parameterized prompt architecture
+
+voices:
+  host: "zh-CN-YunyangNeural"        # Male, professional, reliable
+  cohost: "zh-CN-XiaoxiaoNeural"     # Female, warm, news/novel
+
+roles:
+  host_name: "云扬"
+  cohost_name: "晓晓"
+  podcast_name: "Agent 架构内幕"
+
+conversation:
+  style:
+    - engaging
+    - conversational
+    - educational
+  engagement_techniques:
+    - rhetorical questions
+    - analogies
+    - concrete codebase examples
+    - deliberate misunderstandings
+  dialogue_structure:
+    - Introduction (hook + topic reveal)
+    - Core Content (70% of runtime)
+    - Summary + Preview Next Episode
+
+defaults:
+  word_count: 5000           # Target Chinese characters per episode
+  speaker_min_chars: 15      # Minimum chars per utterance
+  speaker_max_chars: 100     # Maximum chars per utterance
+
+episodes:
+  1: { title: "Core Agent Loop", file: "0001-core-agent-loop.txt" }
+  2: { title: "Tool System", file: "0002-tool-system.txt" }
+  3: { title: "Context Management", file: "0003-context-management.txt" }
+  4: { title: "Permission Model", file: "0004-permission-model.txt" }
+  5: { title: "Memory Architecture", file: "0005-memory-architecture.txt" }
+  6: { title: "Sub-agents", file: "0006-subagents.txt" }
+  7: { title: "UI / Transport", file: "0007-ui-transport.txt" }
+  8: { title: "Error Recovery", file: "0008-error-recovery.txt" }
