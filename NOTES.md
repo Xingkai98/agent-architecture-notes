@@ -1,5 +1,9 @@
 # Teaching Notes
 
+## Workspace Scope
+
+This is now a **personal learning space** for all CS/AI topics. Not limited to agent architecture. User may start new learning tracks on any topic using the teach skill. Materials may or may not be published to GitHub Pages depending on the topic — user decides case by case.
+
 ## User Preferences
 - User is highly technical and can handle advanced material from the start
 - User prefers structural, comparative analysis — not tutorial-style introductions

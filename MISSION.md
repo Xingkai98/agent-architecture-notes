@@ -1,4 +1,8 @@
-# Mission: Agent Architecture from First Principles
+# Mission: Personal Learning Space
+
+This is a general learning workspace. All computer science and AI topics go here — not just agent architecture.
+
+## Active Mission: Agent Architecture from First Principles
 
 ## Why
 I want to deeply understand the architectural design space of AI agents — how their harnesses, tool loops, context management, and safety layers are built — so I can make informed architectural decisions when building or evaluating agent systems. I need this grounded in real codebases, not blog-post summaries.
