@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Java 快速参考</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  :root { --bg: #fffff8; --text: #111; --muted: #666; --accent: #a00; --rule: #ddd; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 6rem; background: var(--bg); color: var(--text); line-height: 1.5; }
+  h1 { font-size: 2rem; margin-bottom: 0.15rem; }
+  h2 { font-size: 1.35rem; margin: 2.2rem 0 0.6rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  h3 { font-size: 1.08rem; margin: 1.5rem 0 0.5rem; }
+  p { font-size: 0.95rem; margin-bottom: 0.8rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+  li { font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.25rem; }
+  .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; font-style: italic; }
+  code { font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.87rem; background: #f4f4f0; padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: #f4f4f0; padding: 1rem 1.2rem; margin: 0.8rem 0 1.2rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.45; border-left: 3px solid #a00; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.85rem; }
+  th, td { padding: 0.45rem 0.55rem; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; background: #f8f8f0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:nth-child(even) td { background: #fafaf6; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .callout { background: #fffacd; border: 1px solid #e6da8a; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1rem 0; }
+  .card { border: 1px solid var(--rule); padding: 1rem; background: #fafaf6; }
+  .card h3 { margin: 0 0 0.4rem 0; font-size: 1.05rem; }
+  @media (max-width: 600px) { .card-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="#" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>Java 快速参考</h1>
+<p class="subtitle">概念优先的 Java 技术知识手册 —— 用说人话的方式重温 JVM、并发、数据库和框架的核心原理。</p>
+<p class="meta">参考文档，持续更新。覆盖 Java 后端工程师日常所需的核心技术栈。不适合零基础入门，适合需要快速回顾已学概念的技术人员。</p>
+
+<div class="callout">
+<strong>使用建议：</strong>这是一份"回忆提纲"而非"入门教程"。每个概念都以简短解释+核心要点的方式呈现，目的是帮你快速唤醒记忆。如果某个概念你完全没印象，建议先查阅相关教材再回来看。
+</div>
+
+<h2>1. JVM 基础</h2>
+
+<h3>1.1 JVM 内存模型</h3>
+<p>JVM 运行时数据区分为线程共享区和线程私有区两大类，理解这个划分是理解 Java 内存问题的基础。</p>
+
+<table>
+  <tr><th>区域</th><th>共享/私有</th><th>存储内容</th><th>GC 参与</th></tr>
+  <tr><td>堆 (Heap)</td><td>线程共享</td><td>对象实例、数组</td><td>是</td></tr>
+  <tr><td>方法区 / 元空间</td><td>线程共享</td><td>类元信息、静态变量、常量池、JIT 编译后的代码</td><td>很少</td></tr>
+  <tr><td>程序计数器 (PC)</td><td>线程私有</td><td>当前线程执行的字节码行号</td><td>否</td></tr>
+  <tr><td>虚拟机栈 (VM Stack)</td><td>线程私有</td><td>栈帧（局部变量表、操作数栈、方法出口等）</td><td>否</td></tr>
+  <tr><td>本地方法栈</td><td>线程私有</td><td>Native 方法调用</td><td>否</td></tr>
+</table>
+
+<p><strong>类比：</strong>可以把 JVM 想象成一个餐厅。堆是后厨的大冰箱，所有食材（对象）都在里面；每个线程的虚拟机栈就是服务员手里的托盘，每人一个，互不干扰；方法区/元空间是贴在墙上的菜谱，所有服务员都能看；程序计数器是服务员当前读到菜谱的哪一行。冰箱满了（OOM）就要清理（GC）。</p>
+
+<h3>1.2 堆内存结构（分代模型）</h3>
+<p>绝大多数 JVM 使用分代垃圾回收。堆分为新生代和老年代，新生代又细分为 Eden 区和两个 Survivor 区。</p>
+
+<ul>
+  <li><strong>新生代 (Young Generation)：</strong>Eden + S0 + S1，默认比例 8:1:1。绝大部分对象朝生夕死，新创建的对象分配在 Eden 区。Minor GC 发生时，存活对象在 Eden 和 Survivor 之间复制，每活过一次 GC 年龄 +1。</li>
+  <li><strong>老年代 (Old/Tenured Generation)：</strong>当对象年龄超过阈值（默认 15，通过 <code>-XX:MaxTenuringThreshold</code> 设置），或被动态年龄判定认为应该晋升时，对象进入老年代。老年代空间大但回收慢。</li>
+  <li><strong>字符串常量池：</strong>JDK 7+ 移到堆中；<code>String.intern()</code> 可手动入池。</li>
+</ul>
+
+<p><strong>为什么会 OOM？</strong>常见原因：堆太小装不下（堆 OOM）、线程开太多（栈 OOM，每个线程默认 1MB 栈）、元空间满了（<code>-XX:MaxMetaspaceSize</code> 设太小）、GC overhead 超限（98% 时间在 GC 却只回收不到 2% 内存）。</p>
+
+<h3>1.3 垃圾回收算法与收集器</h3>
+
+<div class="card-grid">
+  <div class="card">
+    <h3>标记-清除 (Mark-Sweep)</h3>
+    <p>先标记存活对象，再清除未标记的。最基础，但产生内存碎片。</p>
+  </div>
+  <div class="card">
+    <h3>标记-复制 (Mark-Copy)</h3>
+    <p>把存活对象复制到另一块区域，原区域整块清空。适合新生代（存活率低），需要空间翻倍。</p>
+  </div>
+  <div class="card">
+    <h3>标记-整理 (Mark-Compact)</h3>
+    <p>标记后把存活对象向一端移动，然后清理边界外的内存。耗时但无碎片，适合老年代。</p>
+  </div>
+  <div class="card">
+    <h3>分代收集</h3>
+    <p>组合使用以上算法。新生代用复制，老年代用标记-清除或标记-整理。</p>
+  </div>
+</div>
+
+<p><strong>常见 GC 组合及适用场景：</strong></p>
+<ul>
+  <li><strong>Serial + Serial Old：</strong>单线程，适合客户端应用或小堆（&lt;100MB）。会 STW，但简单高效。</li>
+  <li><strong>Parallel Scavenge + Parallel Old (JDK 8 默认)：</strong>吞吐量优先。多线程并行回收，仍会 STW，但持续时间短。适合后台计算任务。</li>
+  <li><strong>ParNew + CMS：</strong>响应时间优先。CMS 老年代并发回收，多数阶段与用户线程并发。缺点：产生碎片、对 CPU 敏感、浮动垃圾。</li>
+  <li><strong>G1 (JDK 9+ 默认)：</strong>面向大堆（&gt;4GB），将堆分成大小相等的 Region。通过 Remembered Set 解决跨 Region 引用。可预测的停顿时间，通过 <code>-XX:MaxGCPauseMillis</code> 指定目标。</li>
+  <li><strong>ZGC (JDK 11 实验性, JDK 15+ 生产可用)：</strong>超低延迟（亚毫秒级），支持 TB 级堆。使用染色指针和读屏障技术，回收阶段几乎全并发。</li>
+  <li><strong>Shenandoah：</strong>与 ZGC 目标类似，使用 Brooks 指针转发。JDK 12+ 可用。</li>
+</ul>
+
+<p><strong>GC 日志关键参数（JDK 9+ 统一格式）：</strong></p>
+<pre><code>-Xlog:gc*:file=gc.log:time,level,tags:filecount=5,filesize=10M</code></pre>
+
+<h3>1.4 类加载机制</h3>
+<p><strong>三步走：</strong>加载 (Loading) &rarr; 链接 (Linking，含验证、准备、解析) &rarr; 初始化 (Initialization)。</p>
+<p><strong>双亲委派模型：</strong>类加载器收到请求后，先委托父加载器尝试加载，父加载器找不到时才自己加载。这保证了 Java 核心类库（如 <code>java.lang.String</code>）不会被自定义类加载器篡改。加载器层级：Bootstrap (JVM 内置，C++ 实现) &rarr; Extension/Platform &rarr; Application &rarr; 自定义。</p>
+<p><strong>破坏双亲委派的场景：</strong>JDBC（SPI 机制通过线程上下文类加载器回调）、Tomcat 的 WebappClassLoader（隔离不同应用的类）、OSGi 的网状加载。</p>
+<p><strong>类比：</strong>双亲委派就像公司审批流程——基层员工接到请求先问组长，组长再问经理，经理问总监，逐级上推。没人能处理才往下找。这样就没人能越级越权。</p>
+
+<h2>2. MySQL</h2>
+
+<h3>2.1 架构概览</h3>
+<p>MySQL 采用 Server 层 + 存储引擎层的插件式架构。Server 层处理连接、认证、解析、优化、执行，不关心数据如何存储；存储引擎层负责实际的数据存取。最常用的引擎是 InnoDB。</p>
+
+<h3>2.2 索引</h3>
+<p>InnoDB 默认用 B+ 树作为索引结构。B+ 树是一种平衡多路搜索树，所有数据都存在叶子节点，非叶子节点只存键值做导航。叶子节点之间用双向链表连接，支持高效的范围查询。</p>
+
+<pre><code>-- 联合索引最左前缀原则示例
+CREATE INDEX idx_abc ON orders (a, b, c);
+-- 命中索引: WHERE a=1; WHERE a=1 AND b=2; WHERE a=1 AND b=2 AND c=3;
+-- 不命中:   WHERE b=2; WHERE c=3; WHERE a=1 AND c=3 (跳过了 b)
+
+-- 查看是否走索引
+EXPLAIN SELECT * FROM orders WHERE a=1 AND b&gt;2 ORDER BY c;</code></pre>
+
+<p><strong>聚簇索引 vs 二级索引：</strong>InnoDB 的主键索引是聚簇索引，叶子节点存的是整行数据。二级索引的叶子节点存的是主键值，查完二级索引还需要回表查主键索引。如果查询列直接在索引中就避免回表 —— 这就是"覆盖索引"优化。</p>
+
+<p><strong>索引失效常见场景：</strong>范围查询右边的列（如 <code>&gt;、&lt;、BETWEEN</code> 后的列）、在索引列上做函数/计算、隐式类型转换、LIKE 以 <code>%</code> 开头、OR 连接非索引列、NOT IN / &lt;&gt; / IS NOT NULL（视情况）。</p>
+
+<p><strong>类比：</strong>B+ 树索引就像书的目录——根目录不包含正文内容，只告诉你翻到哪一章；叶子节点的链表则像目录页的页码连续标注，方便你从头到尾通读某个主题的所有内容。</p>
+
+<h3>2.3 事务与隔离级别</h3>
+<p>ACID：原子性 (Atomicity)、一致性 (Consistency)、隔离性 (Isolation)、持久性 (Durability)。</p>
+
+<table>
+  <tr><th>隔离级别</th><th>脏读</th><th>不可重复读</th><th>幻读</th><th>实现方式 (InnoDB)</th></tr>
+  <tr><td>READ UNCOMMITTED</td><td>可能</td><td>可能</td><td>可能</td><td>几乎不用</td></tr>
+  <tr><td>READ COMMITTED</td><td>防止</td><td>可能</td><td>可能</td><td>每次 SELECT 创建新的 ReadView</td></tr>
+  <tr><td>REPEATABLE READ (默认)</td><td>防止</td><td>防止</td><td>部分防止</td><td>事务开始时创建一个 ReadView</td></tr>
+  <tr><td>SERIALIZABLE</td><td>防止</td><td>防止</td><td>防止</td><td>所有 SELECT 自动加共享锁</td></tr>
+</table>
+
+<p><strong>MVCC (多版本并发控制)：</strong>InnoDB 通过隐藏列（<code>DB_TRX_ID</code> 事务ID、<code>DB_ROLL_PTR</code> 回滚指针）和 undo log 实现快照读。每条记录都有版本链，通过 ReadView 判断某个版本对当前事务是否可见。MVCC 的核心价值是"读不阻塞写，写不阻塞读"。</p>
+
+<p><strong>类比：</strong>MVCC 就像 Git 版本管理。每个事务看到的是代码仓库的某个快照 (commit)，别人在你后面提交的修改你看不到，等你提交时如果冲突了 (锁冲突/更新丢失) 就来解决。undo log 就是 commit 历史链。</p>
+
+<h3>2.4 锁机制</h3>
+<ul>
+  <li><strong>全局锁：</strong><code>FLUSH TABLES WITH READ LOCK</code>，全库只读，用于全库备份。</li>
+  <li><strong>表级锁：</strong>表锁、元数据锁 (MDL，DDL 自动加)、意向锁 (IS/IX，InnoDB 用于协调表锁和行锁)。</li>
+  <li><strong>行级锁：</strong>Record Lock（单行锁）、Gap Lock（间隙锁，锁定索引记录间的间隙）、Next-Key Lock（Record + Gap，InnoDB RR 级别默认的加锁方式，用来防幻读）。</li>
+</ul>
+
+<p><strong>死锁排查：</strong><code>SHOW ENGINE INNODB STATUS\G</code> 查看最后一次死锁信息。预防死锁：按相同顺序访问资源、合理设计索引避免锁升级、缩短事务。</p>
+
+<h3>2.5 SQL 优化思路</h3>
+<ol>
+  <li><strong>看慢查询日志：</strong>开启 <code>slow_query_log</code>，设置 <code>long_query_time</code>，找出瓶颈 SQL。</li>
+  <li><strong>看 EXPLAIN：</strong>重点关注 <code>type</code> (system &gt; const &gt; eq_ref &gt; ref &gt; range &gt; index &gt; ALL)、<code>key</code> (实际使用的索引)、<code>rows</code> (预估扫描行数)、<code>Extra</code> (Using filesort / Using temporary 是坏消息)。</li>
+  <li><strong>加索引不是银弹：</strong>索引会增加写入成本和空间占用。权衡读写比，有时候改写 SQL（如避免 SELECT *、限制结果集）比加索引更有效。</li>
+  <li><strong>大表优化：</strong>分库分表（ShardingSphere 等中间件）、冷热数据分离、读写分离、合理的数据归档策略。</li>
+</ol>
+
+<h2>3. Redis</h2>
+
+<h3>3.1 数据结构与底层实现</h3>
+<p>Redis 是单线程事件驱动的内存数据库。核心数据结构及底层编码：</p>
+
+<table>
+  <tr><th>数据类型</th><th>底层编码 (小数据量)</th><th>底层编码 (大数据量)</th><th>适用场景</th></tr>
+  <tr><td>String</td><td>int / embstr (嵌入式字符串)</td><td>raw (SDS 简单动态字符串)</td><td>缓存值、计数器、分布式锁</td></tr>
+  <tr><td>List</td><td>ziplist / quicklist</td><td>quicklist (ziplist 的双向链表)</td><td>消息队列、最新列表</td></tr>
+  <tr><td>Hash</td><td>ziplist</td><td>hashtable (dict)</td><td>对象属性缓存</td></tr>
+  <tr><td>Set</td><td>intset</td><td>hashtable</td><td>标签、去重、交并差</td></tr>
+  <tr><td>ZSet</td><td>ziplist</td><td>skiplist + dict</td><td>排行榜、延迟队列</td></tr>
+</table>
+
+<p><strong>跳表 (Skip List)：</strong>ZSet 的核心数据结构。多层索引链表，查找时从顶层开始，每次比较决定是往下走还是往前走。平均 O(log N) 查找，实现比红黑树简单得多。类比：大楼里的快速电梯 —— 顶层直达高层，然后再逐层停靠，比从 1 楼爬楼梯快得多。</p>
+
+<h3>3.2 持久化</h3>
+<ul>
+  <li><strong>RDB (快照)：</strong>指定时间间隔拍快照 (<code>save 900 1</code> 表示 900 秒内 1 次修改就触发)。二进制紧凑，恢复快，但可能丢失最后一次快照之后的修改。fork 子进程写时复制 (COW)，内存翻倍风险。</li>
+  <li><strong>AOF (追加文件)：</strong>每一条写命令都追加到日志文件。三种 fsync 策略：always（每次写入）、everysec（每秒，推荐）、no（OS 决定）。AOF 文件大时可触发 AOF rewrite（fork 子进程，根据当前数据生成新的最小命令集）。</li>
+  <li><strong>混合持久化 (Redis 4.0+)：</strong>rewrite 时把 RDB 二进制内容放在 AOF 文件前部，后续增量用 AOF 记录。兼顾恢复速度和数据安全性。</li>
+</ul>
+
+<h3>3.3 缓存策略与问题</h3>
+<ul>
+  <li><strong>缓存穿透：</strong>查一个不存在的数据，缓存没有，每次都打到 DB。解决方案：布隆过滤器、缓存空值（设短过期时间）。</li>
+  <li><strong>缓存击穿：</strong>某个热点 key 过期瞬间，大量请求同时打到 DB。解决方案：互斥锁（SETNX）保证只有一个线程去加载 DB、逻辑过期（不设物理过期，后台异步更新）、永不过期。</li>
+  <li><strong>缓存雪崩：</strong>大量 key 同时过期或 Redis 宕机，所有请求打到 DB。解决方案：过期时间加随机偏移、主从+哨兵/集群保证高可用、降级限流。</li>
+  <li><strong>淘汰策略：</strong><code>noeviction</code>（不淘汰，OOM 报错）、<code>allkeys-lru</code>（最常用）、<code>allkeys-lfu</code>（Redis 4.0+，按访问频率）、<code>volatile-lru</code>（只淘汰带过期时间的 key）、<code>volatile-ttl</code>（优先淘汰快过期的）。</li>
+</ul>
+
+<p><strong>缓存一致性：</strong>经典的"先删缓存再写 DB"和"先写 DB 再删缓存"都不是完美的。推荐：先更新 DB 再删除缓存（Cache Aside 模式）+ 延迟双删（写入后短暂延迟再删一次缓存）作为双保险。</p>
+
+<h3>3.4 高可用架构</h3>
+<ul>
+  <li><strong>主从复制：</strong>一主多从，读写分离。复制过程：全量同步（RDB 快照）+ 增量同步（replication buffer）。</li>
+  <li><strong>哨兵 (Sentinel)：</strong>监控、通知、自动故障转移。至少 3 个哨兵实例，quorum 投票选出新主。哨兵本身不存数据，只做管理者。</li>
+  <li><strong>集群 (Cluster)：</strong>数据分片（16384 个 slot），每个节点负责部分 slot。客户端根据 CRC16(key) % 16384 路由到对应节点。支持自动故障转移、在线扩容缩容。</li>
+</ul>
+
+<h2>4. Java 并发编程</h2>
+
+<h3>4.1 线程基础</h3>
+<p>线程状态转换：NEW &rarr; RUNNABLE &rarr; (WAITING / TIMED_WAITING / BLOCKED) &rarr; TERMINATED。</p>
+<p><strong>BLOCKED vs WAITING：</strong>BLOCKED 是被动等锁（等待进入 synchronized 代码块或方法）；WAITING 是主动等待（Object.wait()、Thread.join()、LockSupport.park()），需要其他线程显式唤醒。</p>
+
+<h3>4.2 锁机制全景</h3>
+
+<p><strong>synchronized 锁升级（JDK 6+ 的优化）：</strong></p>
+<ol>
+  <li><strong>偏向锁 (Biased Locking)：</strong>假定锁总被同一个线程获取，在该线程第一次获取时在对象头做一个"偏向"标记。之后该线程再进入无需 CAS 操作。JDK 15 默认关闭，JDK 18+ 废弃。</li>
+  <li><strong>轻量级锁 (Lightweight / Thin Lock)：</strong>当出现竞争但还不激烈时，通过 CAS 在对象头设置 Lock Record 指针。自旋等待，不阻塞。默认自旋 10 次（自适应自旋）。</li>
+  <li><strong>重量级锁 (Heavyweight / Fat Lock)：</strong>竞争激烈时膨胀为重量级锁，未获取锁的线程进入 Monitor 的等待队列，阻塞挂起。由 OS 的互斥量实现，涉及用户态-内核态切换。</li>
+</ol>
+
+<p><strong>类比：</strong>会议室预约。偏向锁 = 每周这个时段默认归你，不用每次都登记；轻量级锁 = 今天有人也想用这个时段，你们商量"我马上用完，你等一下"（自旋）；重量级锁 = 争得太厉害，排号叫号吧（OS 互斥量），轮到你了前台（内核）会叫你。</p>
+
+<p><strong>AQS (AbstractQueuedSynchronizer) 原理：</strong>AQS 是 JUC 包的核心基础。用 int state 表示同步状态 + 一个 CLH 变体队列管理等待线程。子类通过实现 <code>tryAcquire/tryRelease</code> (独占模式) 或 <code>tryAcquireShared/tryReleaseShared</code> (共享模式) 来定义自己的同步逻辑。基于 AQS 的常用工具：</p>
+
+<table>
+  <tr><th>工具</th><th>模式</th><th>核心机制</th></tr>
+  <tr><td>ReentrantLock</td><td>独占</td><td>可重入、公平/非公平、可中断、超时获取</td></tr>
+  <tr><td>Semaphore</td><td>共享</td><td>信号量，控制同时访问资源的线程数</td></tr>
+  <tr><td>CountDownLatch</td><td>共享</td><td>计数器归零时释放所有等待线程，一次性使用</td></tr>
+  <tr><td>CyclicBarrier</td><td>独占+共享</td><td>一组线程互相等待，全部到达后一起继续，可循环使用</td></tr>
+  <tr><td>ReentrantReadWriteLock</td><td>共享+独占</td><td>读读共享、读写互斥、写写互斥</td></tr>
+</table>
+
+<p><strong>synchronized vs ReentrantLock：</strong>synchronized 是 JVM 层面的关键字，自动加解锁，非公平，不可中断，只支持一个条件队列（wait/notify）。ReentrantLock 是 API 层面的类，需要手动 finally unlock，可选公平/非公平，可中断、可超时获取，支持多个 Condition 做更精细的线程调度。</p>
+
+<h3>4.3 volatile 和 CAS</h3>
+<ul>
+  <li><strong>volatile：</strong>轻量级同步。保证可见性（写立即刷回主存，读从主存取）和有序性（禁止指令重排，通过内存屏障）。<strong>不保证原子性</strong>——i++ 仍然不安全。适用场景：状态标志位、DCL 单例模式（与 synchronized 配合）。</li>
+  <li><strong>CAS (Compare-And-Swap)：</strong>乐观锁的核心。比较当前值是否等于期望值，是则原子更新，否则重试。CPU 指令级的原子操作（cmpxchg）。ABA 问题可通过版本号（如 AtomicStampedReference）解决。</li>
+</ul>
+
+<h3>4.4 线程池 (ThreadPoolExecutor)</h3>
+<p><strong>核心参数：</strong>corePoolSize（核心线程数，常驻即便是空闲）、maximumPoolSize（最大线程数）、keepAliveTime（非核心线程空闲存活时间）、workQueue（阻塞队列，核心满了先排队再开新线程）、handler（拒绝策略）。</p>
+
+<p><strong>任务提交流程：</strong>核心线程用满 &rarr; 任务进入 workQueue 排队 &rarr; 队列满了开新线程直到 maximumPoolSize &rarr; 都满了执行拒绝策略。</p>
+
+<p><strong>四种标准拒绝策略：</strong>AbortPolicy（抛异常，默认）、CallerRunsPolicy（由提交任务的线程自己执行）、DiscardPolicy（静默丢弃）、DiscardOldestPolicy（丢弃队头最老的任务）。</p>
+
+<p><strong>阻塞队列选择：</strong>SynchronousQueue（不存，适用于最大线程数设很大的场景）、LinkedBlockingQueue（无界慎用，任务堆积导致 OOM）、ArrayBlockingQueue（有界，推荐生产使用）、DelayQueue（延迟任务）。</p>
+
+<p><strong>类比：</strong>线程池像银行柜台。3 个常设窗口 (corePoolSize)，人多了先在大厅沙发排队 (workQueue)，沙发坐满了临时再开 2 个窗口 (max-core)，新窗口开完后还有人进来就得在门口保安处被拒绝 (reject policy)。</p>
+
+<h3>4.5 ThreadLocal</h3>
+<p>每个线程有自己的 ThreadLocalMap，以 ThreadLocal 对象为 key 存储值。value 是强引用，但 ThreadLocal 对象本身可以被回收（如果用 static 修饰则不会被回收）。核心风险：线程池场景下线程复用导致数据串了或内存泄漏——线程不销毁，ThreadLocalMap 中的 Entry 也不会被自动清理。解决方案：每次使用完调用 <code>remove()</code>。InheritableThreadLocal 可以让子线程继承父线程的值。</p>
+
+<h2>5. Spring 框架</h2>
+
+<h3>5.1 IoC 容器</h3>
+<p><strong>控制反转 (IoC)：</strong>程序员不再自己 new 对象，而是由容器负责创建和装配。依赖注入 (DI) 是 IoC 最常见的实现方式。</p>
+<p><strong>Bean 生命周期：</strong>实例化 (构造器/工厂方法) &rarr; 属性填充 (依赖注入) &rarr; 各类 Aware 接口回调 &rarr; BeanPostProcessor 前置处理 &rarr; InitializingBean / init-method &rarr; BeanPostProcessor 后置处理（AOP 代理在此生成） &rarr; 就绪 &rarr; DisposableBean / destroy-method &rarr; 销毁。</p>
+<p><strong>循环依赖：</strong>Spring 只能解决单例 setter 注入的循环依赖（通过三级缓存机制：singletonObjects、earlySingletonObjects、singletonFactories）。构造器注入的循环依赖无法解决，会抛 BeanCurrentlyInCreationException。推荐从根本上避免循环依赖——重新设计类结构。</p>
+
+<h3>5.2 AOP</h3>
+<p>面向切面编程。核心概念：切面 (Aspect)、连接点 (Join Point)、通知 (Advice，Before/After/Around/AfterReturning/AfterThrowing)、切点 (Pointcut)、织入 (Weaving)。</p>
+<p><strong>代理方式：</strong>JDK 动态代理（基于接口，通过 Proxy + InvocationHandler）、CGLIB 代理（基于继承，通过字节码生成子类）。Spring Boot 2.x 起默认使用 CGLIB，无论是否有接口。AspectJ 是编译期织入，性能最好但需要额外编译过程。</p>
+<p><strong>为什么 @Transactional 自调用失效？</strong>AOP 代理是基于代理对象的切面拦截。在目标类内部通过 this.xxx() 调用自己的另一个方法时，调用是直接针对 this 的，绕过了代理对象，因此切面拦截不生效。解决方案：把方法抽到另一个 Bean 中，或通过 AopContext.currentProxy() 获取当前代理，或用 AspectJ 编译期织入。</p>
+
+<h3>5.3 事务管理</h3>
+<ul>
+  <li><strong>声明式事务 (@Transactional)：</strong>基于 AOP，配置方便。可指定传播行为 (Propagation)、隔离级别 (Isolation)、回滚规则 (rollbackFor)、超时 (timeout)、只读 (readOnly)。</li>
+  <li><strong>事务传播行为 (7 种)：</strong></li>
+</ul>
+<table>
+  <tr><th>传播行为</th><th>说明</th></tr>
+  <tr><td>REQUIRED (默认)</td><td>有事务则加入，没有则新建。最常用。</td></tr>
+  <tr><td>REQUIRES_NEW</td><td>总是新建事务，挂起当前事务。用于需要独立提交/回滚的子操作（如记日志）。</td></tr>
+  <tr><td>NESTED</td><td>嵌套事务，通过 savepoint 实现部分回滚。只支持 JDBC，JPA 不支持。</td></tr>
+  <tr><td>SUPPORTS</td><td>有事务则加入，没有则非事务执行。</td></tr>
+  <tr><td>NOT_SUPPORTED</td><td>非事务执行，挂起当前事务。</td></tr>
+  <tr><td>MANDATORY</td><td>必须在事务中，否则抛异常。</td></tr>
+  <tr><td>NEVER</td><td>必须在非事务中，否则抛异常。</td></tr>
+</table>
+
+<h3>5.4 Spring Boot 自动配置</h3>
+<p><strong>@SpringBootApplication</strong> 是三合一的注解：<code>@SpringBootConfiguration</code> + <code>@EnableAutoConfiguration</code> + <code>@ComponentScan</code>。</p>
+<p><strong>自动配置原理：</strong><code>@EnableAutoConfiguration</code> 通过 <code>@Import(AutoConfigurationImportSelector.class)</code> 读取所有 jar 包下 <code>META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> 文件中列出的配置类，再根据 <code>@Conditional</code> 系列注解（如 <code>@ConditionalOnClass</code>、<code>@ConditionalOnMissingBean</code>）决定是否生效。</p>
+
+<div class="callout">
+<strong>Spring Boot 3.x 变化提醒：</strong>JDK 17+ 基线、javax.* &rarr; jakarta.* 迁移、基于 Spring Framework 6.x、原生支持 GraalVM AOT 编译。自动配置注册从 <code>spring.factories</code> 改为 <code>AutoConfiguration.imports</code> 文件。
+</div>
+
+<h2>6. AI / Agent 基础知识</h2>
+
+<h3>6.1 大语言模型 (LLM) 基本原理</h3>
+<p>大语言模型本质是一个"下一个 token 预测器"。给定一段文本前缀，模型计算词汇表中每个 token 出现的概率，然后采样输出下一个 token，再把这个 token 追加到前缀中，重复这个过程。驱动 LLM 的关键技术：</p>
+<ul>
+  <li><strong>Transformer 架构：</strong>核心是注意力机制 (Attention)，让模型能"关注"输入序列中任意位置的信息。Self-Attention 就是让每个 token 都能看到所有其他 token，计算它们之间的相关性权重。</li>
+  <li><strong>Tokenization：</strong>把文本切成 token（不是字也不是词，而是介于两者之间的文本片段）。同一个模型家族使用相同的 tokenizer，这决定了模型的"词汇量"（vocabulary size）。</li>
+  <li><strong>Context Window（上下文窗口）：</strong>模型一次能"看到"的最大 token 数。更大的上下文窗口意味着模型可以处理更长的文档或对话，但注意力和计算成本也更高。</li>
+  <li><strong>训练 vs 推理：</strong>预训练 (Pre-training) 是让模型从海量文本中学习语言模式；指令微调 (Instruction Tuning / SFT) 是让模型学会遵循人类指令；RLHF (人类反馈强化学习) 是对齐人类偏好。推理 (Inference) 是实际使用时模型生成文本的过程。</li>
+  <li><strong>Prompting：</strong>提示工程是指精心设计输入文本，以引导模型产生预期输出。关键技巧包括：few-shot 示例、chain-of-thought (CoT) 逐步推理、role assignment 角色设定、output format 格式约束。</li>
+</ul>
+
+<p><strong>类比：</strong>LLM 像一个读过几千万本书的速记员。你给他一段开头，他能凭"语感"接出最可能的下一句。这种语感来自训练时看了海量文本，学习了语言的统计规律。他不是真的"理解"意思，而是极其擅长模式匹配和补全。但正因为这种能力太过强大，很多情况下表现出了类似"理解"的行为。</p>
+
+<h3>6.2 Agent 架构核心概念</h3>
+<p>AI Agent (智能体) 是一个能够自主感知环境、做出决策并执行行动的 AI 系统。与聊天机器人不同，Agent 不只是在对话框里对话——它能够使用工具、执行多步骤计划、与外部系统交互。</p>
+
+<ul>
+  <li><strong>核心循环 (Core/Loop)：</strong>Agent 运行的基本节奏：接收输入 &rarr; LLM 思考（生成推理 + 决定要调用什么工具） &rarr; 执行工具调用 &rarr; 把工具结果反馈给 LLM &rarr; 重复直到 LLM 决定输出最终答案。这个"思考-行动-观察"的循环被称为 ReAct 模式。</li>
+  <li><strong>工具系统 (Tool System)：</strong>Agent 的能力边界由它可用的工具集决定。工具可以是：文件操作（读/写/搜索）、终端命令执行、API 调用、数据库查询、浏览器操作等。工具通过函数调用 (function calling) 或 MCP (Model Context Protocol) 等协议暴露给 LLM。</li>
+  <li><strong>上下文管理 (Context Management)：</strong>随着 Agent 运行，对话和工具结果不断累积，可能超出模型的上下文窗口。上下文精简 (compaction) 技术包括：摘要（让 LLM 压缩历史）、截断（丢弃早期内容）、微精简（将单个工具的大结果替换为简短摘要）。</li>
+  <li><strong>记忆系统 (Memory)：</strong>短期记忆 = 当前会话上下文；长期记忆 = 跨会话保存的信息（用户偏好、项目约定、经验教训），通常存为文件或向量数据库。</li>
+  <li><strong>规划与推理 (Planning & Reasoning)：</strong>复杂任务需要 Agent 先做规划再执行。常见模式：Plan-then-Execute（先制定计划再逐步执行）、Chain-of-Thought（每一步都输出推理过程）、Tree-of-Thought（多条推理路径并扩展最优的）。</li>
+</ul>
+
+<p><strong>类比：</strong>Agent 像一个全能实习生。你告诉 TA 一个目标（"帮我写一份 Java 项目的部署文档"），TA 不会一次写出来，而是先去读项目文件（工具调用-读文件），了解项目结构（推理），查一下相关技术资料（工具调用-搜索），然后开始写（工具调用-写文件），写完可能还会检查一遍（推理+工具调用）。这中间的每一步决策都来自 LLM 的"思考"，而执行能力来自工具系统。</p>
+
+<h3>6.3 RAG (检索增强生成)</h3>
+<p>RAG 是让 LLM 回答私有知识问题的核心技术。工作流程：用户提问 &rarr; 将问题转为向量 &rarr; 在向量数据库中检索相似文档 &rarr; 将检索到的文档和原问题一起发给 LLM &rarr; LLM 根据检索结果生成回答。</p>
+<p>RAG 的核心价值：解决了 LLM 的"知识截止日期"问题（可以用最新文档）、"幻觉"问题（回答基于真实文档而非凭空生成）、"私有知识"问题（不用把私有数据训练进模型）。</p>
+<p><strong>关键技术点：</strong>文档分块策略（chunk size 和 overlap 的权衡）、Embedding 模型选择（中文推荐 bge-large-zh 或 M3E）、检索质量优化（HyDE、Reranker 二次排序）、多路召回（关键词检索+向量检索混合）。</p>
+
+<h3>6.4 多 Agent 协作与工具链</h3>
+<ul>
+  <li><strong>单一 Agent + 丰富工具集：</strong>一个 Agent 配备大量工具，自己决定用哪些。优点：架构简单；缺点：提示词太长、容易混淆。</li>
+  <li><strong>多 Agent 分工：</strong>不同 Agent 各司其职，例如：架构师 Agent 做规划 + 编码 Agent 写代码 + 审查 Agent 检查质量。Agent 间通过消息或共享状态通信。</li>
+  <li><strong>Agent Swarm (智能体群)：</strong>多个同构 Agent 并行处理不同子任务，类似于 MapReduce 模式。</li>
+  <li><strong>Human-in-the-Loop：</strong>关键决策点（如部署、数据库变更、权限变更）需要人类确认后再执行，是安全可控的工程实践。</li>
+</ul>
+
+<h3>6.5 工程实践中的关键权衡</h3>
+<table>
+  <tr><th>维度</th><th>选择一</th><th>选择二</th><th>场景</th></tr>
+  <tr><td>工具执行时机</td><td>批量执行（LLM 输出完再执行）</td><td>流式执行（边输出边执行）</td><td>延迟 vs 实现复杂度</td></tr>
+  <tr><td>上下文管理</td><td>主动压缩（接近上限前压缩）</td><td>被动压缩（413 错误后压缩）</td><td>节省 token vs 节约开发成本</td></tr>
+  <tr><td>子任务隔离</td><td>沙箱子 Agent（结果回传）</td><td>共享上下文子 Agent</td><td>安全性 vs 信息透明度</td></tr>
+  <tr><td>权限模型</td><td>每次确认（交互式）</td><td>自动批准（受信环境）</td><td>安全 vs 效率</td></tr>
+  <tr><td>记忆存储</td><td>文件系统 (Markdown/JSON)</td><td>向量数据库</td><td>简单可控 vs 语义检索能力</td></tr>
+</table>
+
+<div class="nav">
+  <span><a href="../../index.html">&larr; Home</a></span>
+  <span><a href="../reference/glossary.html">Agent Harness Glossary &rarr;</a></span>
+</div>
+
+<script src="../../assets/lang-switcher.js"></script>
+</body>
+</html>
