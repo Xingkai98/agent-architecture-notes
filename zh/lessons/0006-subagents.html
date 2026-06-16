@@ -11,6 +11,8 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #6f42c1, #0366d6, #28a745, #dc3545); border-radius: 3px; }
+  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
+  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -158,14 +160,14 @@ def delegate_task(
 
 <p>在 <code>codex-rs/core/src/tools/handlers/multi_agents_v2.rs</code>，五个工具构成完整生命周期：</p>
 
-<table>
+<div class="tbl"><table>
   <tr><th>工具</th><th>用途</th></tr>
   <tr><td><code>spawn_agent</code></td><td>创建带有任务描述的新 sub-agent</td></tr>
   <tr><td><code>wait_for_agent</code></td><td>阻塞直到特定子级完成，收集其结果</td></tr>
   <tr><td><code>send_message</code></td><td>向运行中的子级发送中间执行消息</td></tr>
   <tr><td><code>interrupt_agent</code></td><td>停止运行中的子级并收集其部分结果</td></tr>
   <tr><td><code>list_agents</code></td><td>枚举所有活跃子级及其状态</td></tr>
-</table>
+</table></div>
 
 <h3>Spawn 选项</h3>
 
@@ -281,14 +283,14 @@ interface SpawnAcpParams {
 
 <p>在 <code>middleware/async_subagents.py:866</code>，<code>AsyncSubAgentMiddleware</code> 暴露五个用于远程 sub-agent 生命周期管理的工具：</p>
 
-<table>
+<div class="tbl"><table>
   <tr><th>工具</th><th>用途</th></tr>
   <tr><td><code>start_async_task</code></td><td>在远程 LangGraph 部署上启动 sub-agent</td></tr>
   <tr><td><code>check_async_task</code></td><td>轮询远程 sub-agent 的状态</td></tr>
   <tr><td><code>update_async_task</code></td><td>修改运行中远程 sub-agent 的指令</td></tr>
   <tr><td><code>cancel_async_task</code></td><td>终止远程 sub-agent</td></tr>
   <tr><td><code>list_async_tasks</code></td><td>枚举所有远程 sub-agent 及其状态</td></tr>
-</table>
+</table></div>
 
 <p>这在我们的代码库中是独一无二的：DeepAgents 异步 sub-agent 是<strong>唯一</strong>使用 LangGraph SDK 进行远程执行的 sub-agent 实现。Sub-agent 运行在独立的 LangGraph 部署上，而非父进程内。任务状态通过 <code>AsyncSubAgentState.async_tasks</code> 和 <code>_tasks_reducer</code> 跟踪。</p>
 
@@ -331,7 +333,7 @@ interface SpawnAcpParams {
 
 <h2>对比表格</h2>
 
-<table>
+<div class="tbl"><table>
   <tr><th>代码库</th><th>Spawn 模型</th><th>上下文隔离</th><th>并发</th><th>预算模型</th><th>结果流</th><th>嵌套</th></tr>
   <tr><td><strong>claude-code</strong></td><td>进程内（forked context）</td><td>克隆的 ToolUseContext</td><td>Sync + Async + Swarm</td><td>共享（父级管理）</td><td>返回值 / 回调</td><td>是（fork）</td></tr>
   <tr><td><strong>hermes-agent</strong></td><td>ThreadPoolExecutor</td><td>新 AIAgent 实例</td><td>max_concurrent_children=3</td><td>每子级 IterationBudget（50）</td><td>返回值（阻塞）</td><td>是（orchestrator 角色，最大深度）</td></tr>
@@ -342,7 +344,7 @@ interface SpawnAcpParams {
   <tr><td><strong>openclaw</strong></td><td>ACP spawn</td><td>ACP channel 隔离</td><td>24 个 ACP channel</td><td>每 agent model + thinking 配置</td><td>Channel 订阅</td><td>是（ACP 路由）</td></tr>
   <tr><td><strong>deepagents</strong></td><td>进程内（LangGraph 状态）</td><td>共享状态（排除 messages、todos、structured_response）</td><td>顺序（sync）/ 通过 LangGraph SDK 远程（async）</td><td>每 sub-agent 规范（model、tools、middleware）</td><td>返回值（sync）/ 通过 check_async_task 轮询（async）</td><td>是（task 工具）</td></tr>
   <tr><td><strong>deerflow</strong></td><td>双线程池（调度 + 执行）</td><td>完全隔离（checkpointer=False，无状态共享）</td><td>MAX_CONCURRENT_SUBAGENTS=3（截断）</td><td>每 sub-agent：max_turns（50）、timeout_seconds（900）</td><td>轮询（5 秒间隔）</td><td>是（general-purpose 有 task 工具）</td></tr>
-</table>
+</table></div>
 
 <h2>设计启发</h2>
 

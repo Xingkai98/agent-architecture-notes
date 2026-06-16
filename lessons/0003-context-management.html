@@ -11,6 +11,8 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
+  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -249,19 +251,19 @@ DanglingToolCallMiddleware → SummarizationMiddleware → TodoListMiddleware �
 
 <p>The difference between a flat array and a tree is not just a data structure choice — it determines what operations are possible:</p>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Operation</th><th>Flat array (claude-code, hermes-agent, nanobot, deepagents, deer-flow, codex, opencode)</th><th>Tree (pi-mono, openclaw)</th></tr>
   <tr><td><strong>Undo compaction</strong></td><td>Must keep old array copy or re-request</td><td>Change which nodes are "active" — no data loss</td></tr>
   <tr><td><strong>Branch from mid-conversation</strong></td><td>Copy the array up to that point</td><td>Add a new branch node — O(1)</td></tr>
   <tr><td><strong>Merge branches</strong></td><td>Manual reconciliation of two arrays</td><td>Walk both subtrees, produce merged summary node</td></tr>
   <tr><td><strong>Re-summarize with different granularity</strong></td><td>Can't — the original messages are gone</td><td>Delete old compaction node, create new one from preserved children</td></tr>
-</table>
+</table></div>
 
 <p>pi-mono and openclaw chose the tree model primarily to support branching — the same conversation can fork into multiple directions. But the secondary benefit (undoable, redoable compaction) turned out to be just as valuable.</p>
 
 <h2>Comparative table</h2>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Dimension</th><th>claude-code</th><th>pi-mono</th><th>openclaw</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th><th>deepagents</th><th>deer-flow</th></tr>
   <tr><td><strong>Compaction type</strong></td><td>Proactive + Reactive</td><td>Reactive</td><td>Reactive</td><td>Proactive (preflight) + Reactive</td><td>Proactive (per-turn)</td><td>Hook (shell cmds)</td><td>Delegate (provider)</td><td>Middleware (proactive, LLM-driven)</td><td>Middleware (proactive, configurable)</td></tr>
   <tr><td><strong>Summarization model</strong></td><td>LLM (internal)</td><td>LLM (internal)</td><td>LLM (internal)</td><td>LLM + fallback rules</td><td>LLM (multi-round)</td><td>None (external)</td><td>None (delegated)</td><td>LLM (middleware) + emergency fallback</td><td>LLM (middleware)</td></tr>
@@ -269,7 +271,7 @@ DanglingToolCallMiddleware → SummarizationMiddleware → TodoListMiddleware �
   <tr><td><strong>History model</strong></td><td>Flat array + commit-log collapses</td><td>Tree (typed entries)</td><td>Tree (typed entries)</td><td>Flat array</td><td>Flat array (capped 120)</td><td>Flat array (typed markers)</td><td>Flat array</td><td>Flat array + DeltaChannel (O(N) checkpoints)</td><td>Flat array (19-middleware chain)</td></tr>
   <tr><td><strong>Tail protection</strong></td><td>Reserve tokens + auto-compact threshold</td><td>keepRecentTokens: 20000</td><td>keepRecentTokens: 20000</td><td>Anti-thrashing (10% floor)</td><td>Keep last 8 messages</td><td>Hook-defined</td><td>Provider-defined</td><td>Fraction threshold (0.85) or 170K tokens</td><td>reserve_ratio: 0.1</td></tr>
   <tr><td><strong>Unique feature</strong></td><td>7-layer system + diminishing-returns detection</td><td>Split-turn compaction</td><td>Iterative summary updates</td><td>Reference-only prefix + FTS5</td><td>5-round consolidation</td><td>Fully configurable hooks</td><td>Zero compaction code</td><td>FilesystemMiddleware auto-offloads large results</td><td>DeferredToolFilter hides MCP schemas</td></tr>
-</table>
+</table></div>
 
 <h2>Design heuristics</h2>
 

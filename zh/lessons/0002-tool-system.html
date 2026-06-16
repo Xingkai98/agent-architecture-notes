@@ -11,6 +11,8 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
+  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -135,7 +137,7 @@ pub trait CoreToolRuntime: Send + Sync {
   // ... 30+ 个方法，每个工具处理器一个
 }</code></pre>
 
-<table>
+<div class="tbl"><table>
   <tr><th>代码库</th><th>定义格式</th><th>Schema 校验</th></tr>
   <tr><td>pi-mono / openclaw</td><td>TypeScript 泛型接口</td><td>工具级别（手动）</td></tr>
   <tr><td>claude-code</td><td>Zod 类型对象</td><td>Zod 解析输入</td></tr>
@@ -143,7 +145,7 @@ pub trait CoreToolRuntime: Send + Sync {
   <tr><td>nanobot</td><td>JSON Schema + ABC</td><td>在 prepare_call() 中做 JSON Schema 校验</td></tr>
   <tr><td>codex</td><td>Rust trait + ToolSpec</td><td>编译时 + serde</td></tr>
   <tr><td>opencode</td><td>Effect Schema</td><td>Schema.decodeUnknownEffect</td></tr>
-</table>
+</table></div>
 
 <h2>阶段 2：注册 — 工具如何被发现</h2>
 
@@ -188,7 +190,7 @@ pub trait CoreToolRuntime: Send + Sync {
 
 <p>每个代码库都有“哪些工具可以一起运行”的概念：</p>
 
-<table>
+<div class="tbl"><table>
   <tr><th>代码库</th><th>并发模型</th><th>实现</th></tr>
   <tr><td>pi-mono</td><td>顺序或并行（Promise.all）</td><td><code>executeToolCallsSequential</code> / <code>executeToolCallsParallel</code></td></tr>
   <tr><td>openclaw</td><td>顺序或并行（Promise.all）</td><td>与 pi-mono 相同模式，每个工具有 <code>executionMode</code></td></tr>
@@ -199,7 +201,7 @@ pub trait CoreToolRuntime: Send + Sync {
   <tr><td>opencode</td><td>通过 Effect fiber 顺序 settle</td><td>每次 <code>settle()</code> 调用是其自身 Effect</td></tr>
   <tr><td>deepagents</td><td>通过 ToolNode 顺序执行</td><td>LangGraph 的 <code>ToolNode</code> 按顺序执行工具；中间件可通过 <code>wrap_tool_call</code> 包装</td></tr>
   <tr><td>deer-flow</td><td>顺序 + 并发批次</td><td><code>_execute_concurrent_tool_calls()</code> 用于安全工具；<code>SubAgentLimitMiddleware</code> 上限为 3</td></tr>
-</table>
+</table></div>
 
 <h3>沙箱</h3>
 
@@ -225,7 +227,7 @@ pub trait CoreToolRuntime: Send + Sync {
 
 <h2>对比总表</h2>
 
-<table>
+<div class="tbl"><table>
   <tr><th>维度</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th><th>deepagents</th><th>deer-flow</th></tr>
   <tr><td><strong>工具数量</strong></td><td>4（应用定义）</td><td>不适用（框架）</td><td>30+</td><td>80+</td><td>~20</td><td>30+ 个处理器</td><td>~15</td><td>~10（中间件）</td><td>~20（组装）</td></tr>
   <tr><td><strong>定义</strong></td><td>TS 泛型</td><td>TS 泛型</td><td>Zod 对象</td><td>JSON Schema 字典</td><td>ABC + JSON Schema</td><td>Rust trait</td><td>Effect Schema</td><td>LangChain BaseTool</td><td>LangChain BaseTool</td></tr>
@@ -235,7 +237,7 @@ pub trait CoreToolRuntime: Send + Sync {
   <tr><td><strong>并发</strong></td><td>顺序/并行</td><td>顺序/并行</td><td>分区</td><td>顺序 + 异步桥接</td><td>顺序 + 标志</td><td>Tokio 并行</td><td>顺序（Effect）</td><td>顺序（ToolNode）</td><td>批次 顺序/并行</td></tr>
   <tr><td><strong>结果处理</strong></td><td>ToolResultMessage</td><td>ToolResultMessage + 进度</td><td>7+ 渲染方法 + 卸载</td><td>JSON 字符串</td><td>原始 + 错误字符串</td><td>ToolOutput trait</td><td>Schema 编码</td><td>中间件包装</td><td>中间件包装 + 截断</td></tr>
   <tr><td><strong>独特之处</strong></td><td>钩子生命周期</td><td>进度流式传输</td><td>逐工具 UI 渲染</td><td>工具集 + TTL 缓存</td><td>插件发现</td><td>沙箱升级</td><td>作用域清理</td><td>描述覆盖</td><td>延迟工具加载</td></tr>
-</table>
+</table></div>
 
 <h2>核心权衡：复杂度预算</h2>
 

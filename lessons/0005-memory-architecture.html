@@ -12,6 +12,8 @@
   .tier-diagram .tier .label { font-weight: 600; display: block; margin-bottom: 0.3rem; }
   .tier-diagram .tier .detail { font-size: 0.78rem; color: #555; }
   .tier-diagram .arrow { font-size: 1.5rem; color: #888; padding: 0 0.5rem; }
+  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
+  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -319,7 +321,7 @@ class CompositeBackend:
 
 <h2>Comparative table</h2>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Dimension</th><th>hermes-agent</th><th>claude-code</th><th>nanobot</th><th>codex</th><th>deepagents</th><th>deerflow</th><th>pi-mono</th><th>openclaw</th><th>opencode</th></tr>
   <tr>
     <td><strong>Working memory</strong></td>
@@ -405,7 +407,7 @@ class CompositeBackend:
     <td>Opt-in SDK architecture</td>
     <td>UI-only persistence</td>
   </tr>
-</table>
+</table></div>
 
 <h2>Design heuristics</h2>
 

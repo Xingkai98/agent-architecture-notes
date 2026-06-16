@@ -11,6 +11,8 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
+  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -134,7 +136,7 @@ pub trait CoreToolRuntime: Send + Sync {
   // ... 30+ methods, one per tool handler
 }</code></pre>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Codebase</th><th>Definition Format</th><th>Schema Validation</th></tr>
   <tr><td>pi-mono / openclaw</td><td>TypeScript generic interface</td><td>Tool-level (manual)</td></tr>
   <tr><td>claude-code</td><td>Zod-typed objects</td><td>Zod parse on input</td></tr>
@@ -142,7 +144,7 @@ pub trait CoreToolRuntime: Send + Sync {
   <tr><td>nanobot</td><td>JSON Schema + ABC</td><td>JSON Schema validate in prepare_call()</td></tr>
   <tr><td>codex</td><td>Rust trait + ToolSpec</td><td>Compile-time + serde</td></tr>
   <tr><td>opencode</td><td>Effect Schema</td><td>Schema.decodeUnknownEffect</td></tr>
-</table>
+</table></div>
 
 <h2>Stage 2: Register — how tools are discovered</h2>
 
@@ -187,7 +189,7 @@ pub trait CoreToolRuntime: Send + Sync {
 
 <p>Every codebase has a concept of which tools can run together:</p>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Codebase</th><th>Concurrency Model</th><th>Implementation</th></tr>
   <tr><td>pi-mono</td><td>Sequential or Parallel (Promise.all)</td><td><code>executeToolCallsSequential</code> / <code>executeToolCallsParallel</code></td></tr>
   <tr><td>openclaw</td><td>Sequential or Parallel (Promise.all)</td><td>Same pattern as pi-mono, <code>executionMode</code> per tool</td></tr>
@@ -198,7 +200,7 @@ pub trait CoreToolRuntime: Send + Sync {
   <tr><td>opencode</td><td>Sequential settling via Effect fiber</td><td>Each <code>settle()</code> call is its own Effect</td></tr>
   <tr><td>deepagents</td><td>Sequential via ToolNode</td><td>LangGraph's <code>ToolNode</code> executes tools in order; middleware can wrap via <code>wrap_tool_call</code></td></tr>
   <tr><td>deer-flow</td><td>Sequential + concurrent batches</td><td><code>_execute_concurrent_tool_calls()</code> for safe tools; <code>SubAgentLimitMiddleware</code> caps at 3</td></tr>
-</table>
+</table></div>
 
 <h3>Sandboxing</h3>
 
@@ -224,7 +226,7 @@ pub trait CoreToolRuntime: Send + Sync {
 
 <h2>Comparative table</h2>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Dimension</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th><th>deepagents</th><th>deer-flow</th></tr>
   <tr><td><strong>Tool count</strong></td><td>4 (app-defined)</td><td>N/A (framework)</td><td>30+</td><td>80+</td><td>~20</td><td>30+ handlers</td><td>~15</td><td>~10 (middleware)</td><td>~20 (assembled)</td></tr>
   <tr><td><strong>Definition</strong></td><td>TS generic</td><td>TS generic</td><td>Zod object</td><td>JSON Schema dict</td><td>ABC + JSON Schema</td><td>Rust trait</td><td>Effect Schema</td><td>LangChain BaseTool</td><td>LangChain BaseTool</td></tr>
@@ -234,7 +236,7 @@ pub trait CoreToolRuntime: Send + Sync {
   <tr><td><strong>Concurrency</strong></td><td>Seq/Par</td><td>Seq/Par</td><td>Partitioned</td><td>Seq + async bridge</td><td>Seq + flags</td><td>Tokio parallel</td><td>Seq (Effect)</td><td>Seq (ToolNode)</td><td>Batch seq/par</td></tr>
   <tr><td><strong>Result handling</strong></td><td>ToolResultMessage</td><td>ToolResultMessage + progress</td><td>7+ render methods + offloading</td><td>JSON string</td><td>Raw + error string</td><td>ToolOutput trait</td><td>Schema-encoded</td><td>Middleware wrap</td><td>Middleware wrap + truncation</td></tr>
   <tr><td><strong>Unique</strong></td><td>Hook lifecycle</td><td>Progress streaming</td><td>Per-tool UI rendering</td><td>Toolsets + TTL cache</td><td>Plugin discovery</td><td>Sandbox escalation</td><td>Scope cleanup</td><td>Description overrides</td><td>Deferred tool loading</td></tr>
-</table>
+</table></div>
 
 <h2>The fundamental tradeoff: complexity budget</h2>
 

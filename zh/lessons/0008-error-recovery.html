@@ -11,6 +11,8 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
+  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -68,7 +70,7 @@
 
 <p>循环的每次退出都用行号记录。这些不是异常——它们是带有 <code>reason</code> 鉴别器的显式 <code>return</code> 语句：</p>
 
-<table>
+<div class="tbl"><table>
   <tr><th>原因</th><th>行号</th><th>触发条件</th></tr>
   <tr><td><code>blocking_limit</code></td><td>646</td><td>drain-and-retry 次数超过限制，未成功重试</td></tr>
   <tr><td><code>image_error</code></td><td>977</td><td>无法将上传的图片转换为 base64</td></tr>
@@ -81,7 +83,7 @@
   <tr><td><code>aborted_tools</code></td><td>1515</td><td>用户在工具执行期间中止</td></tr>
   <tr><td><code>hook_stopped</code></td><td>1520</td><td>一个 hook 请求循环停止</td></tr>
   <tr><td><code>max_turns</code></td><td>1711</td><td>轮次计数超过 <code>MAX_TURNS</code> 限制</td></tr>
-</table>
+</table></div>
 
 <h3>7 个恢复转换</h3>
 
@@ -353,7 +355,7 @@ type RunError =
 
 <h2>对比表格</h2>
 
-<table>
+<div class="tbl"><table>
   <tr><th>维度</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>DeepAgents</th><th>DeerFlow</th><th>nanobot</th><th>codex</th><th>opencode</th></tr>
   <tr><td><strong>API 重试</strong></td><td>无</td><td>无</td><td>指数退避 + 回退模型</td><td>带抖动指数退避（5-120s）</td><td>ModelRetryMiddleware</td><td>LLMErrorHandlingMiddleware</td><td>3 次尝试或无限制</td><td>无（委派）</td><td>Effect 重试</td></tr>
   <tr><td><strong>上下文溢出</strong></td><td>transformContext 钩子</td><td>transformContext 钩子</td><td>Drain + collapse + retry（多阶段）</td><td>截断 + 图片丢弃（6 个守卫）</td><td>SummarizationMiddleware 紧急回退</td><td>LLMErrorHandling 规范化</td><td>无显式</td><td>无</td><td>单次压缩 + 重试</td></tr>
@@ -363,7 +365,7 @@ type RunError =
   <tr><td><strong>Max-tokens 恢复</strong></td><td>无</td><td>无</td><td>两阶段：升级 + 注入（3x）</td><td>无显式</td><td>SummarizationMiddleware</td><td>LoopDetectionMiddleware（硬停止）</td><td>长度恢复消息（3x）</td><td>无</td><td>无</td></tr>
   <tr><td><strong>状态保留</strong></td><td>无</td><td>无</td><td>可变 State 对象</td><td>TurnRetryState（14 个标志）</td><td>中间件链包装调用</td><td>Worker checkpoint 快照</td><td>Checkpoint 到磁盘</td><td>备份损坏 DB</td><td>上下文快照</td></tr>
   <tr><td><strong>独特之处</strong></td><td>调用者拥有的钩子</td><td>进度感知中止</td><td>平坦循环：所有退出在一个函数中可见</td><td>一次性守卫矩阵</td><td>中间件即边界组合</td><td>LoopDetectionMiddleware（唯一具有显式循环检测的代码库）</td><td>流中断恢复</td><td>SQLite 取证备份</td><td>Effect-TS 类型化联合</td></tr>
-</table>
+</table></div>
 
 <h2>设计启发</h2>
 

@@ -11,6 +11,8 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #5a5a5a, #4a90d9, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
+  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -87,7 +89,7 @@ from prompt_toolkit.key_binding import KeyBindings
 # 与 Pi-mono 对比：TextArea/KeyBindings 以下的所有内容
 # 都在 packages/tui/src/tui.ts（53KB）中从零实现</code></pre>
 
-<table>
+<div class="tbl"><table>
   <tr><th>代码库</th><th>TUI 库</th><th>语言</th><th>关键文件</th><th>渲染范式</th></tr>
   <tr><td>Claude Code</td><td>自定义 Ink fork（React）</td><td>TypeScript</td><td>src/ink/ink.tsx（251KB）、Messages.tsx（147KB）、VirtualMessageList.tsx（148KB）</td><td>声明式 JSX + Virtual DOM diff</td></tr>
   <tr><td>Codex</td><td>ratatui + crossterm</td><td>Rust</td><td>codex-rs/tui/src/tui.rs、app.rs（58KB）</td><td>保留模式 widget 树</td></tr>
@@ -95,7 +97,7 @@ from prompt_toolkit.key_binding import KeyBindings
   <tr><td>Hermes-agent</td><td>prompt_toolkit</td><td>Python</td><td>cli.py</td><td>Widget 组合 + 按键绑定</td></tr>
   <tr><td>Opencode</td><td>OpenTUI + Solid.js</td><td>TypeScript</td><td>packages/tui/src/app.tsx（36KB）</td><td>响应式 JSX（signals，无 vDOM）</td></tr>
   <tr><td>Nanobot</td><td>prompt_toolkit + rich</td><td>Python</td><td>cli/commands.py（67KB）</td><td>Prompt 循环 + rich 格式化</td></tr>
-</table>
+</table></div>
 
 <h2>客户端/服务端分离</h2>
 
@@ -189,7 +191,7 @@ class BaseChannel(ABC):
 
 <h2>对比表格</h2>
 
-<table>
+<div class="tbl"><table>
   <tr><th>代码库</th><th>界面范式</th><th>TUI 库</th><th>客户端/服务端分离</th><th>多频道</th><th>渲染方法</th></tr>
   <tr><td>Claude Code</td><td>REPL/TUI + 结构化 IO</td><td>自定义 Ink fork（React）</td><td>否（单体）</td><td>否</td><td>Virtual DOM diff 配合虚拟滚动</td></tr>
   <tr><td>Pi-mono</td><td>REPL/TUI</td><td>自定义（从零开始，53KB）</td><td>否（单体）</td><td>否</td><td>命令式组件渲染</td></tr>
@@ -200,7 +202,7 @@ class BaseChannel(ABC):
   <tr><td>OpenClaw</td><td>Daemon + 多频道</td><td>无（无头 gateway）</td><td>是（gateway protocol）</td><td>是（24 个频道）</td><td>N/A（消息总线输出）</td></tr>
   <tr><td>DeepAgents</td><td>CLI + LangGraph Server API</td><td>无（Click/argparse CLI）</td><td>是（LangGraph Server）</td><td>否</td><td>LangGraph 流模式（8 种模式）</td></tr>
   <tr><td>DeerFlow</td><td>Web UI + 多频道 + 嵌入式 + REST</td><td>无（Next.js + IM 频道）</td><td>是（nginx → Gateway + Frontend）</td><td>是（7 个 IM 平台）</td><td>SSE 流式传输 via StreamBridge</td></tr>
-</table>
+</table></div>
 
 <h2>设计启发</h2>
 

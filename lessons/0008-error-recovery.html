@@ -11,6 +11,8 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
+  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -68,7 +70,7 @@
 
 <p>Every exit from the loop is documented with a line number. These are not exceptions — they are explicit <code>return</code> statements with a <code>reason</code> discriminator:</p>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Reason</th><th>Line</th><th>Trigger</th></tr>
   <tr><td><code>blocking_limit</code></td><td>646</td><td>Drain-and-retry count exceeded without successful retry</td></tr>
   <tr><td><code>image_error</code></td><td>977</td><td>Failed to convert uploaded image to base64</td></tr>
@@ -81,7 +83,7 @@
   <tr><td><code>aborted_tools</code></td><td>1515</td><td>User aborted during tool execution</td></tr>
   <tr><td><code>hook_stopped</code></td><td>1520</td><td>A hook requested the loop stop</td></tr>
   <tr><td><code>max_turns</code></td><td>1711</td><td>Turn count exceeded <code>MAX_TURNS</code> limit</td></tr>
-</table>
+</table></div>
 
 <h3>The 7 recovery transitions</h3>
 
@@ -353,7 +355,7 @@ type RunError =
 
 <h2>Comparative table</h2>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Dimension</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>DeepAgents</th><th>DeerFlow</th><th>nanobot</th><th>codex</th><th>opencode</th></tr>
   <tr><td><strong>API retry</strong></td><td>None</td><td>None</td><td>Exponential + fallback model</td><td>Jittered exp (5-120s)</td><td>ModelRetryMiddleware</td><td>LLMErrorHandlingMiddleware</td><td>3 attempts or unlimited</td><td>None (delegated)</td><td>Effect retry</td></tr>
   <tr><td><strong>Context overflow</strong></td><td>transformContext hook</td><td>transformContext hook</td><td>Drain + collapse + retry (multi-stage)</td><td>Truncation + image drop (6 guards)</td><td>SummarizationMiddleware emergency fallback</td><td>LLMErrorHandling normalization</td><td>None explicit</td><td>None</td><td>Single-shot compact + retry</td></tr>
@@ -363,7 +365,7 @@ type RunError =
   <tr><td><strong>Max-tokens recovery</strong></td><td>None</td><td>None</td><td>2-phase: escalate + inject (3x)</td><td>None explicit</td><td>SummarizationMiddleware</td><td>LoopDetectionMiddleware (hard-stop)</td><td>Length recovery msg (3x)</td><td>None</td><td>None</td></tr>
   <tr><td><strong>State preservation</strong></td><td>None</td><td>None</td><td>Mutable State object</td><td>TurnRetryState (14 flags)</td><td>Middleware chain wraps calls</td><td>Worker checkpoint snapshot</td><td>Checkpoint to disk</td><td>Backup corrupt DB</td><td>Context snapshots</td></tr>
   <tr><td><strong>Unique</strong></td><td>Caller-owned hooks</td><td>Progress-aware abort</td><td>Flat loop: all exits visible in one function</td><td>One-shot guard matrix</td><td>Middleware-as-boundaries composition</td><td>LoopDetectionMiddleware (only codebase with explicit loop detection)</td><td>Stream stall resume</td><td>SQLite forensic backup</td><td>Effect-TS typed union</td></tr>
-</table>
+</table></div>
 
 <h2>Design heuristics</h2>
 
