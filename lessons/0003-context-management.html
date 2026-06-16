@@ -203,7 +203,7 @@ RESTORE → COMPACT → COMMAND → BUILD → RUN → SAVE → RESPOND → DONE<
 
 <h2>Middleware-driven context management (deepagents, deer-flow)</h2>
 
-<p>DeepAgents and DeerFlow introduce a fundamentally different pattern: context management as <strong>explicit named middleware</strong> rather than implicit logic inside the agent loop. This is the same "explicit middleware vs implicit coupling" pattern seen in Lessons <a href="0001-agent-loop.html">0001</a> and <a href="0002-tool-system.html">0002</a> — but applied to context management. In the existing seven codebases, compaction, token counting, and content trimming are functions called inside the agent loop. In DeepAgents and DeerFlow, they are standalone middleware classes with clear interfaces and configurable triggers.</p>
+<p>DeepAgents and DeerFlow introduce a fundamentally different pattern: context management as <strong>explicit named middleware</strong> rather than implicit logic inside the agent loop. This is the same "explicit middleware vs implicit coupling" pattern seen in Lessons <a href="0001-core-agent-loop.html">0001</a> and <a href="0002-tool-system.html">0002</a> — but applied to context management. In the existing seven codebases, compaction, token counting, and content trimming are functions called inside the agent loop. In DeepAgents and DeerFlow, they are standalone middleware classes with clear interfaces and configurable triggers.</p>
 
 <h3>DeepAgents: SummarizationMiddleware and FilesystemMiddleware</h3>
 
