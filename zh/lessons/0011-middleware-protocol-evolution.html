@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第11课：从 AgentExecutor 到中间件协议</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  :root { --bg: #fffff8; --text: #111; --muted: #666; --accent: #a00; --rule: #ddd; --code-bg: #f4f4f0; --highlight: #fffacd; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif; max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 6rem; background: var(--bg); color: var(--text); line-height: 1.5; }
+  h1 { font-size: 2rem; margin-bottom: 0.15rem; } h2 { font-size: 1.35rem; margin: 2.2rem 0 0.6rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; } h3 { font-size: 1.08rem; margin: 1.5rem 0 0.5rem; }
+  p { font-size: 0.95rem; margin-bottom: 0.8rem; } ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; } li { font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.25rem; } .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; font-style: italic; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; margin-bottom: 0.5rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.85rem; } th,td { padding: 0.45rem 0.55rem; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; background: #f8f8f0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; } tr:nth-child(even) td { background: #fafaf6; }
+  code { font-family: "SF Mono","Monaco","Menlo",monospace; font-size: 0.87rem; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; margin: 0.8rem 0 1.2rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.45; border-left: 3px solid var(--accent); } pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid var(--rule); padding-left: 1rem; margin: 1rem 0; color: var(--muted); font-style: italic; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .quiz { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1.5rem 0; } .quiz h3 { margin-top: 0; }
+  .quiz .question { margin: 1rem 0 0.5rem; font-weight: 600; } .quiz .options { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 1rem; }
+  .quiz .option { padding: 0.35rem 0.6rem; cursor: pointer; border: 1px solid var(--rule); background: #fff; font-size: 0.88rem; } .quiz .option:hover { background: var(--highlight); }
+  .quiz .option.correct { background: #d4edda; border-color: #28a745; } .quiz .option.wrong { background: #f8d7da; border-color: #dc3545; }
+  .quiz .feedback { margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.5rem; }
+  .callout { background: #fffacd; border: 1px solid #e6da8a; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav"><a href="../../lessons/0011-middleware-protocol-evolution.html" data-lang="en">EN</a><span>/</span><a href="#" data-lang="zh">中文</a></nav>
+
+<h1>第11课：从 AgentExecutor 到中间件协议</h1>
+<p class="subtitle">LangChain 的 agent 系统如何从回调驱动的 while 循环演化为基于 LangGraph 的可组合中间件栈。</p>
+<p class="meta">课程二：Agent 基础设施 · 2026年6月 · <a href="0011-middleware-protocol-evolution.html">永久链接</a></p>
+
+<p>LangChain 仓库中包含<strong>两代</strong> agent 系统。经典的 <code>AgentExecutor</code>（已弃用）是一个回调驱动的 while 循环——和课程一中 pi-mono 和 hermes-agent 的模式相同。V1 的 <code>create_agent</code>（当前）是一个编译到 LangGraph StateGraph 的中间件栈——和 deepagents 与 deer-flow 所扩展的模式相同。本课追踪这一演化并提炼架构教训：<strong>回调耦合，中间件组合</strong>。</p>
+
+<p class="sidenote">两套系统共存于同一仓库这一事实很不寻常且很有价值——它是从命令式 agent 循环到声明式中间件栈的架构转型的化石记录。</p>
+
+<h2>AgentExecutor：while 循环时代</h2>
+
+<p><code>AgentExecutor</code> 类位于 <code>langchain_classic/agents/agent.py:1012</code>。<code>_call()</code> 方法（第 1570 行）不断迭代，直到 <code>AgentFinish</code> 或 <code>max_iterations</code>（默认 15）。每次迭代调用 <code>agent.plan()</code> 获取下一个 <code>AgentAction</code>，然后 <code>_perform_agent_action()</code>（第 1380 行）通过 <code>tool.run()</code> 执行工具。</p>
+
+<p>检测是<strong>基于回调</strong>的：<code>CallbackManager</code> 在固定点触发 <code>on_agent_action</code>、<code>on_agent_finish</code>、<code>on_tool_start</code>、<code>on_tool_end</code>。回调是观察者，而非参与者。如果想添加重试逻辑、上下文摘要或权限检查，必须修改 executor 本身或从外部包装它。</p>
+
+<h2>create_agent：图时代</h2>
+
+<p>V1 的 <code>create_agent()</code> 位于 <code>factory.py:787</code>，构建一个带有"model"和"tools"两个节点并由条件边连接的 StateGraph。递归限制为 9999（而 AgentExecutor 为 15）。真正的架构创新不是图本身，而是<strong>中间件 hook 如何成为图节点</strong>。</p>
+
+<h2>6 个 hook 的 AgentMiddleware 协议</h2>
+
+<p><code>AgentMiddleware</code> 位于 <code>middleware/types.py:383</code>，定义了六个 hook 点：</p>
+
+<div class="tbl"><table>
+  <tr><th>Hook</th><th>触发时机</th><th>用途</th></tr>
+  <tr><td><code>before_agent</code></td><td>循环开始前一次</td><td>设置、加载状态</td></tr>
+  <tr><td><code>before_model</code></td><td>每次 LLM 调用前</td><td>修改请求、注入上下文</td></tr>
+  <tr><td><code>after_model</code></td><td>每次 LLM 调用后</td><td>检查响应、检测工具调用</td></tr>
+  <tr><td><code>after_agent</code></td><td>循环结束后一次</td><td>清理、保存状态</td></tr>
+  <tr><td><code>wrap_model_call</code></td><td>包装 LLM 调用</td><td>重试、回退、重写请求</td></tr>
+  <tr><td><code>wrap_tool_call</code></td><td>包装工具执行</td><td>重试、监控、修改输入/输出</td></tr>
+</table></div>
+
+<p>与回调的关键区别：<strong>wrap hook 可以拦截</strong>。<code>wrap_model_call</code> 处理器接收 <code>ModelRequest</code> 和一个调用实际模型的 <code>handler</code> 回调。中间件可以在传递给 handler 之前修改请求、捕获异常并重试，甚至完全跳过 handler。这是"观察执行"和"参与执行"的区别。</p>
+
+<p>在编译后的图中，<code>before_agent</code>、<code>before_model</code>、<code>after_model</code> 和 <code>after_agent</code> 成为<strong>独立的图节点</strong>。而 <code>wrap_model_call</code> 和 <code>wrap_tool_call</code> 通过 <code>_chain_model_call_handlers()</code>（factory.py:234）组合成<strong>嵌套的洋葱层</strong>——列表中的第一个是最外层。</p>
+
+<p>LangChain V1 在 <code>middleware/</code> 下提供了 15+ 个内置中间件：SummarizationMiddleware（自动 compact）、TodoListMiddleware（暴露 <code>write_todos</code> 工具）、HumanInTheLoopMiddleware、ModelRetryMiddleware、ModelFallbackMiddleware、ToolRetryMiddleware、ShellToolMiddleware（沙箱执行）、PIIMiddleware 等。每个中间件都是独立的——一个文件，100-300 行，实现一两个 hook。这种模块化正是 deepagents 和 deer-flow 继承和扩展的东西。</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">课程一：隐式</div><div class="fc-desc">claude-code 的 12 个终止原因内嵌于 queryLoop()</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">课程一：显式</div><div class="fc-desc">deepagents 的 11 个中间件，每个都是命名类</div></div>
+</div>
+
+<div class="callout"><strong>架构教训：</strong>回调观察。中间件参与。如果你今天要构建 agent 框架，从中间件栈开始——你随时可以添加回调作为观察者，但在基于回调的系统中改造中间件需要重写执行循环。</div>
+
+<h2>练习</h2>
+
+<div class="quiz" id="quiz1"><h3>测验</h3>
+<p style="margin-bottom:0.8rem;">每题只有一个正确答案。</p>
+
+<div class="question">Q1. AgentExecutor 的默认最大迭代限制是多少？</div>
+<div class="options">
+  <div class="option" data-q="1" data-a="a">10</div><div class="option" data-q="1" data-a="b">15</div>
+  <div class="option" data-q="1" data-a="c">25</div><div class="option" data-q="1" data-a="d">9999</div>
+</div>
+<div class="feedback" id="feedback1"></div>
+
+<div class="question">Q2. create_agent 中 before/after hook 如何在编译图中实现？</div>
+<div class="options">
+  <div class="option" data-q="2" data-a="a">作为 Python 装饰器</div>
+  <div class="option" data-q="2" data-a="b">作为独立图节点</div>
+  <div class="option" data-q="2" data-a="c">作为回调注册</div>
+  <div class="option" data-q="2" data-a="d">作为环境变量</div>
+</div>
+<div class="feedback" id="feedback2"></div>
+
+<div class="question">Q3. 哪个中间件 hook 适合实现 LLM 失败时的自动重试？</div>
+<div class="options">
+  <div class="option" data-q="3" data-a="a">before_agent</div><div class="option" data-q="3" data-a="b">after_model</div>
+  <div class="option" data-q="3" data-a="c">wrap_model_call</div><div class="option" data-q="3" data-a="d">after_agent</div>
+</div>
+<div class="feedback" id="feedback3"></div>
+
+<div class="question">Q4. 回调和中间件的根本架构区别是什么？</div>
+<div class="options">
+  <div class="option" data-q="4" data-a="a">回调是异步的，中间件是同步的</div>
+  <div class="option" data-q="4" data-a="b">回调观察，中间件参与</div>
+  <div class="option" data-q="4" data-a="c">回调已弃用，中间件是新的</div>
+  <div class="option" data-q="4" data-a="d">回调用事件，中间件用 HTTP</div>
+</div>
+<div class="feedback" id="feedback4"></div>
+</div>
+
+<script>
+(function(){const a={1:'b',2:'b',3:'c',4:'b'};document.querySelectorAll('.option').forEach(o=>{o.addEventListener('click',function(){const q=this.dataset.q,k=this.dataset.a,fb=document.getElementById('feedback'+q);this.parentElement.querySelectorAll('.option').forEach(s=>s.classList.remove('correct','wrong'));if(k===a[q]){this.classList.add('correct');fb.textContent='✓ 正确。';fb.style.color='#155724';}else{this.classList.add('wrong');fb.textContent='✗ 不对。';fb.style.color='#721c24';}});});})();
+</script>
+
+<h2>主要参考来源</h2>
+<ol>
+  <li><strong>AgentExecutor</strong>：<code>langchain_classic/agents/agent.py</code>——类（第 1012 行），_call()（第 1570 行）</li>
+  <li><strong>create_agent</strong>：<code>langchain_v1/langchain/agents/factory.py</code>——create_agent()（第 787 行）</li>
+  <li><strong>AgentMiddleware</strong>：<code>middleware/types.py</code>——类（第 383 行），6 个 hook</li>
+</ol>
+
+<div class="callout"><strong>欢迎提出后续问题。</strong>如果本课有任何不清楚的地方，请向你的 agent 老师提问。</div>
+
+<div class="nav">
+  <span><a href="0010-checkpoint-interrupt-streaming.html">&larr; 第10课：Checkpoint</a></span>
+  <span><a href="0012-role-delegation-vs-conversational.html">第12课：多 Agent 编排 &rarr;</a></span>
+</div>
+
+<script src="../../assets/lang-switcher.js"></script>
+</body>
+</html>

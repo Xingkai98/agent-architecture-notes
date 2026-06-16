@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0009: The Pregel Execution Model — graphs, not loops</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  :root { --bg: #fffff8; --text: #111; --muted: #666; --accent: #a00; --rule: #ddd; --code-bg: #f4f4f0; --highlight: #fffacd; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 6rem; background: var(--bg); color: var(--text); line-height: 1.5; }
+  h1 { font-size: 2rem; margin-bottom: 0.15rem; }
+  h2 { font-size: 1.35rem; margin: 2.2rem 0 0.6rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  h3 { font-size: 1.08rem; margin: 1.5rem 0 0.5rem; }
+  p { font-size: 0.95rem; margin-bottom: 0.8rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+  li { font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.25rem; }
+  .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; font-style: italic; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; margin-bottom: 0.5rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.85rem; }
+  th, td { padding: 0.45rem 0.55rem; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; background: #f8f8f0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:nth-child(even) td { background: #fafaf6; }
+  code { font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.87rem; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; margin: 0.8rem 0 1.2rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.45; border-left: 3px solid var(--accent); }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid var(--rule); padding-left: 1rem; margin: 1rem 0; color: var(--muted); font-style: italic; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .quiz { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1.5rem 0; }
+  .quiz h3 { margin-top: 0; }
+  .quiz .question { margin: 1rem 0 0.5rem; font-weight: 600; }
+  .quiz .options { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 1rem; }
+  .quiz .option { padding: 0.35rem 0.6rem; cursor: pointer; border: 1px solid var(--rule); background: #fff; font-size: 0.88rem; }
+  .quiz .option:hover { background: var(--highlight); }
+  .quiz .option.correct { background: #d4edda; border-color: #28a745; }
+  .quiz .option.wrong { background: #f8d7da; border-color: #dc3545; }
+  .quiz .feedback { margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.5rem; }
+  .callout { background: #fffacd; border: 1px solid #e6da8a; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="#" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>Lesson 0009: The Pregel Execution Model</h1>
+<p class="subtitle">Graphs, not loops — how LangGraph replaces imperative control flow with declarative state machines.</p>
+<p class="meta">Course 2: Agent Infrastructure · June 2026 · <a href="0009-pregel-execution-model.html">Permalink</a></p>
+
+<p>Every agent in <a href="0001-core-agent-loop.html">Course 1</a> is built around a loop. <code>while (should_continue)</code>, <code>for iteration in range(max)</code>, state machines — all imperative. The codebase author writes the iteration logic, handles the state transitions, and manages termination. This lesson introduces a fundamentally different approach: <strong>define a graph, compile it, and let a runtime execute it</strong>.</p>
+
+<p class="sidenote">Pregel was introduced by Google in 2010 as a system for large-scale graph processing. The key insight — Bulk Synchronous Parallel execution — maps naturally to agent workflows: each node is a computation, edges define dependencies, and a barrier synchronizes state between "supersteps."</p>
+
+<p>LangGraph's Pregel runtime is the execution engine beneath <strong>deepagents, deer-flow, and LangChain's create_agent</strong>. When you call <code>agent.astream()</code> on any of these, you're not running a while-loop — you're stepping through a graph one superstep at a time. Understanding this runtime is understanding the "operating system" that half the modern agent ecosystem runs on.</p>
+
+<h2>From loops to graphs</h2>
+
+<p>In Course 1, we saw four loop architectures:</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">A: Nested 2-Loop</div><div class="fc-desc">pi-mono, openclaw</div></div>
+  <div class="fc-box"><div class="fc-label">B: Flat While-True</div><div class="fc-desc">claude-code, hermes-agent</div></div>
+  <div class="fc-box"><div class="fc-label">C: State Machine</div><div class="fc-desc">nanobot, codex</div></div>
+  <div class="fc-box"><div class="fc-label">D: Delegated Graph</div><div class="fc-desc">deepagents, deer-flow</div></div>
+</div>
+
+<p>Architecture D delegates to LangGraph. But what does LangGraph actually <em>do</em>? It compiles a <code>StateGraph</code> definition into a <code>CompiledStateGraph</code> (which extends <code>Pregel</code>), then executes it using the Bulk Synchronous Parallel model. Each iteration is a <strong>superstep</strong> with three phases:</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">1. PLAN</div><div class="fc-desc">prepare_next_tasks() determines which nodes fire based on channel versions</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">2. EXECUTE</div><div class="fc-desc">PregelRunner runs all selected nodes concurrently via asyncio.gather</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">3. UPDATE</div><div class="fc-desc">apply_writes() commits results to channels, bumps versions</div></div>
+</div>
+
+<p><strong>Plan:</strong> <code>prepare_next_tasks()</code> at <code>pregel/_algo.py:392</code> consumes pending <code>Send</code> tasks (PUSH tasks) and checks <code>trigger_to_nodes</code> for channel-driven triggers (PULL tasks). For each triggered node, <code>_proc_input()</code> at line 1348 builds the node's input from current channel state. The function returns a dict of <code>PregelExecutableTask</code> objects — one per triggered node.</p>
+
+<p><strong>Execute:</strong> <code>PregelRunner</code> at <code>pregel/_runner.py:135</code> runs all tasks concurrently. For sync loops, it uses <code>executor.submit()</code>. For async, <code>asyncio.gather()</code>. Nodes that don't share channel dependencies execute in parallel — this is the "bulk synchronous" part of BSP.</p>
+
+<p><strong>Update:</strong> <code>apply_writes()</code> at <code>pregel/_algo.py:232</code> sorts tasks by path, updates <code>versions_seen</code>, applies writes to channels, bumps channel versions, and notifies unchanged channels. Each channel has a <strong>reducer</strong> that controls how concurrent writes merge — a LastValue channel keeps the last write, a BinaryOperatorAggregate channel sums values, a Topic channel appends to a list.</p>
+
+<h2>Channels: the state primitive</h2>
+
+<p>In Course 1's agent loops, state is a mutable object — a struct, a dict, a message list. In LangGraph, state is distributed across <strong>channels</strong>. Each channel has a type that defines its merge behavior:</p>
+
+<div class="tbl"><table>
+  <tr><th>Channel</th><th>Reducer</th><th>Use case</th></tr>
+  <tr><td><strong>LastValue</strong></td><td>Latest write wins</td><td>System prompt, model name, flags</td></tr>
+  <tr><td><strong>Topic</strong></td><td>Append to list</td><td>Message history (with add_messages reducer)</td></tr>
+  <tr><td><strong>EphemeralValue</strong></td><td>Read once, then cleared</td><td>Jump-to-node signals, transient flags</td></tr>
+  <tr><td><strong>BinaryOperatorAggregate</strong></td><td>Apply binary op (sum, max, etc.)</td><td>Token counters, iteration counts</td></tr>
+  <tr><td><strong>DeltaChannel</strong></td><td>Snapshot every N steps</td><td>Large message histories (O(N²)→O(N) checkpoint)</td></tr>
+</table></div>
+
+<p><code>DeltaChannel</code> is the most architecturally interesting. A naive checkpoint would serialize the entire message list at every step — O(N²) storage. DeltaChannel snapshots only every 50 steps, and reconstructs intermediate states by walking back to the nearest snapshot and replaying writes since. This is what deepagents uses at <code>graph.py:67</code> for its <code>DeepAgentState.messages</code>.</p>
+
+<p class="sidenote">Channels are a form of <strong>state machine with merge semantics</strong>. They solve the same problem as CRDTs — how to merge concurrent writes from parallel node execution — but for a much more constrained domain.</p>
+
+<h2>Conditional edges: the graph's decision points</h2>
+
+<p>A <code>StateGraph</code> is built in two steps. First, you add nodes with <code>add_node("name", callable)</code> at <code>graph/state.py:662</code>. Then you wire them together: <code>add_edge("a", "b")</code> for unconditional transitions, <code>add_conditional_edges("a", branch_fn, path_map)</code> at line 969 for branching.</p>
+
+<p>The conditional edge is where LangGraph's "graph as program" nature becomes visible. The <code>branch_fn</code> receives the current state and returns a string — the next node to execute. LangGraph wraps this in a <code>BranchSpec</code> (<code>graph/_branch.py</code>) that, after the source node executes, evaluates the branch function and writes to <code>branch:to:{target}</code> channels. The next superstep's Plan phase reads these channels to determine which nodes fire.</p>
+
+<p>This is how the standard agent graph works:</p>
+
+<pre><code># Every LangGraph-based agent (deepagents, deer-flow, LangChain create_agent)
+# compiles to this topology:
+
+StateGraph(AgentState)
+  .add_node("model", call_llm)         # THINK
+  .add_node("tools", ToolNode(tools))  # ACT
+  .add_edge(START, "model")
+  .add_conditional_edges(
+      "model",
+      lambda state: "tools" if state["messages"][-1].tool_calls else END,
+      {"tools": "tools", END: END}
+  )
+  .add_edge("tools", "model")          # OBSERVE → back to THINK
+  .compile()</code></pre>
+
+<p>The <code>compile()</code> method at <code>graph/state.py:1164</code> validates the graph, resolves channels, wraps each node as a <code>PregelNode</code> with channel readers/writers, and returns a <code>CompiledStateGraph</code> (which extends <code>Pregel</code>). From this point on, <code>invoke()</code> / <code>stream()</code> / <code>astream()</code> all go through the Pregel loop.</p>
+
+<h2>Why graphs beat loops</h2>
+
+<p>The Pregel model gives you three things that imperative loops don't:</p>
+
+<ol>
+  <li><strong>Parallelism for free.</strong> Nodes without channel dependencies execute in the same superstep. In the agent graph above, "model" and "tools" are always sequential (they share the messages channel), but a graph with independent branches — e.g., a research agent that searches the web AND reads local files simultaneously — gets parallelism automatically.</li>
+  <li><strong>Deterministic replay.</strong> Because every channel write is versioned and ordered, replaying a graph from a checkpoint produces exactly the same sequence of states. This enables time-travel debugging, branching from any checkpoint, and audit trails — all covered in <a href="0010-checkpoint-interrupt-streaming.html">Lesson 0010</a>.</li>
+  <li><strong>Durability at the framework level.</strong> The loop author doesn't write save/restore logic — the Pregel runtime checkpoints after every superstep. If the process crashes, the next invocation resumes from the last checkpoint. This is what deer-flow's <code>worker.py</code> relies on for its pre-run checkpoint rollback.</li>
+</ol>
+
+<h2>The tradeoff: opacity</h2>
+
+<p>There is a real cost to the graph model. When a Course 1 agent (claude-code, pi-mono) misbehaves, you set a breakpoint in the while-loop and step through. When a LangGraph agent misbehaves, the stack trace passes through <code>PregelLoop._tick() → prepare_next_tasks() → _apply_writes()</code> — three levels of framework indirection before you reach your node code. Debugging requires understanding the channel version system and the trigger graph.</p>
+
+<div class="callout">
+  <strong>Design heuristic:</strong> If your agent has complex branching (parallel research, sub-agent fan-out), the graph model pays for itself in free parallelism and durability. If your agent is a simple linear think→act→observe loop, an imperative while-loop is simpler to debug. The tipping point is when you have more than one conditional branch or more than three tools — at that point, the channel/reducer model starts preventing bugs that would be manual state management in a flat loop.
+</div>
+
+<h2>Exercise: Trace a superstep</h2>
+
+<div class="quiz" id="quiz1">
+  <h3>Quiz</h3>
+  <p style="margin-bottom:0.8rem;">Each question has exactly one correct answer.</p>
+
+  <div class="question">Q1. What execution model does LangGraph use instead of a while-loop?</div>
+  <div class="options">
+    <div class="option" data-q="1" data-a="a">Event loop</div>
+    <div class="option" data-q="1" data-a="b">Pregel/BSP</div>
+    <div class="option" data-q="1" data-a="c">Actor model</div>
+    <div class="option" data-q="1" data-a="d">Coroutine chain</div>
+  </div>
+  <div class="feedback" id="feedback1"></div>
+
+  <div class="question">Q2. In a Pregel superstep, what happens during the Plan phase?</div>
+  <div class="options">
+    <div class="option" data-q="2" data-a="a">All nodes execute</div>
+    <div class="option" data-q="2" data-a="b">Writes are applied</div>
+    <div class="option" data-q="2" data-a="c">Nodes to fire are determined</div>
+    <div class="option" data-q="2" data-a="d">Channels are cleared</div>
+  </div>
+  <div class="feedback" id="feedback2"></div>
+
+  <div class="question">Q3. Which channel type would you use for a token counter that only increases?</div>
+  <div class="options">
+    <div class="option" data-q="3" data-a="a">LastValue</div>
+    <div class="option" data-q="3" data-a="b">Topic</div>
+    <div class="option" data-q="3" data-a="c">EphemeralValue</div>
+    <div class="option" data-q="3" data-a="d">BinaryOperatorAggregate</div>
+  </div>
+  <div class="feedback" id="feedback3"></div>
+
+  <div class="question">Q4. How does DeltaChannel reduce checkpoint storage growth?</div>
+  <div class="options">
+    <div class="option" data-q="4" data-a="a">Compresses checkpoints</div>
+    <div class="option" data-q="4" data-a="b">Snapshots every N steps + replay</div>
+    <div class="option" data-q="4" data-a="c">Stores only the first and last</div>
+    <div class="option" data-q="4" data-a="d">Uses external cloud storage</div>
+  </div>
+  <div class="feedback" id="feedback4"></div>
+</div>
+
+<script>
+(function() {
+  const answers = { 1: 'b', 2: 'c', 3: 'd', 4: 'b' };
+  document.querySelectorAll('.option').forEach(opt => {
+    opt.addEventListener('click', function() {
+      const q = this.dataset.q;
+      const a = this.dataset.a;
+      const fb = document.getElementById('feedback' + q);
+      this.parentElement.querySelectorAll('.option').forEach(s => s.classList.remove('correct', 'wrong'));
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        fb.textContent = '✓ Correct.';
+        fb.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        fb.textContent = '✗ Not quite — re-read the relevant section above.';
+        fb.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>Primary sources</h2>
+<ol>
+  <li><strong>Pregel class</strong>: <a href="https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/pregel/main.py#L449"><code>pregel/main.py</code> — Pregel class (line 449)</a></li>
+  <li><strong>Execution loop</strong>: <a href="https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/pregel/_loop.py#L592"><code>pregel/_loop.py</code> — tick() (line 592)</a>, after_tick() (line 676)</li>
+  <li><strong>Task scheduling</strong>: <a href="https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/pregel/_algo.py#L392"><code>pregel/_algo.py</code> — prepare_next_tasks() (line 392)</a>, apply_writes() (line 232)</li>
+  <li><strong>StateGraph</strong>: <a href="https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/graph/state.py#L130"><code>graph/state.py</code> — StateGraph (line 130)</a>, compile() (line 1164), add_conditional_edges() (line 969)</li>
+  <li><strong>Pregel paper</strong>: <a href="https://dl.acm.org/doi/10.1145/1807167.1807184">Malewicz et al., "Pregel: A System for Large-Scale Graph Processing" (SIGMOD 2010)</a></li>
+</ol>
+
+<h2>Recommended next reading</h2>
+<ul>
+  <li>If you want to see the loop yourself: <code>langgraph/pregel/_loop.py</code> — the SyncPregelLoop is ~300 lines and shows every phase of a superstep.</li>
+  <li>If you want to understand channel semantics: <code>langgraph/channels/</code> — each file is one channel type with its reducer logic.</li>
+  <li>Next lesson: <a href="0010-checkpoint-interrupt-streaming.html">Lesson 0010</a> covers how the Pregel runtime persists state and enables human-in-the-loop.</li>
+</ul>
+
+<div class="callout">
+  <strong>Ask followup questions.</strong> If anything in this lesson is unclear, or you want to trace a specific execution path through the Pregel source, ask your agent teacher.
+</div>
+
+<div class="nav">
+  <span><a href="0008-error-recovery.html">&larr; Lesson 0008: Error Recovery</a></span>
+  <span><a href="0010-checkpoint-interrupt-streaming.html">Lesson 0010: Checkpoints &amp; Interrupt &rarr;</a></span>
+</div>
+
+<script src="../assets/lang-switcher.js"></script>
+</body>
+</html>

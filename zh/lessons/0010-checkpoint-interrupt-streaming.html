@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第10课：Checkpoint、中断/恢复与流式传输</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  :root { --bg: #fffff8; --text: #111; --muted: #666; --accent: #a00; --rule: #ddd; --code-bg: #f4f4f0; --highlight: #fffacd; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 6rem; background: var(--bg); color: var(--text); line-height: 1.5; }
+  h1 { font-size: 2rem; margin-bottom: 0.15rem; } h2 { font-size: 1.35rem; margin: 2.2rem 0 0.6rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; } h3 { font-size: 1.08rem; margin: 1.5rem 0 0.5rem; }
+  p { font-size: 0.95rem; margin-bottom: 0.8rem; } ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; } li { font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.25rem; } .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; font-style: italic; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; margin-bottom: 0.5rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.85rem; } th, td { padding: 0.45rem 0.55rem; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; background: #f8f8f0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; } tr:nth-child(even) td { background: #fafaf6; }
+  code { font-family: "SF Mono","Monaco","Menlo",monospace; font-size: 0.87rem; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; margin: 0.8rem 0 1.2rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.45; border-left: 3px solid var(--accent); } pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid var(--rule); padding-left: 1rem; margin: 1rem 0; color: var(--muted); font-style: italic; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .quiz { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1.5rem 0; } .quiz h3 { margin-top: 0; }
+  .quiz .question { margin: 1rem 0 0.5rem; font-weight: 600; } .quiz .options { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 1rem; }
+  .quiz .option { padding: 0.35rem 0.6rem; cursor: pointer; border: 1px solid var(--rule); background: #fff; font-size: 0.88rem; } .quiz .option:hover { background: var(--highlight); }
+  .quiz .option.correct { background: #d4edda; border-color: #28a745; } .quiz .option.wrong { background: #f8d7da; border-color: #dc3545; }
+  .quiz .feedback { margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.5rem; }
+  .callout { background: #fffacd; border: 1px solid #e6da8a; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav"><a href="../../lessons/0010-checkpoint-interrupt-streaming.html" data-lang="en">EN</a><span>/</span><a href="#" data-lang="zh">中文</a></nav>
+
+<h1>第10课：Checkpoint、中断/恢复与流式传输</h1>
+<p class="subtitle">LangGraph 如何在超级步之间持久化状态、暂停等待人工输入，并以每种粒度流式传输执行过程。</p>
+<p class="meta">课程二：Agent 基础设施 · 2026年6月 · <a href="0010-checkpoint-interrupt-streaming.html">永久链接</a></p>
+
+<p><a href="0009-pregel-execution-model.html">第9课</a>介绍了 Pregel 执行模型——LangGraph 如何用图超级步替代 while 循环。本课涵盖运行时在超级步<em>之间</em>做了什么：持久化状态、暂停等待人工输入、发出流事件。这三项能力使 LangGraph 超越了图执行器——使其成为生产级 agent 运行时。</p>
+
+<h2>Checkpoint：每一步的状态持久化</h2>
+
+<p>没有 checkpoint，崩溃的 agent 丢失一切。有了 checkpoint，执行可以从上次停止的地方恢复，从任意点分支，或回到之前的状态。LangGraph 的 checkpoint 系统定义于 <code>checkpoint/base/__init__.py</code>。<code>Checkpoint</code> TypedDict（第 92 行）包含 <code>channel_values</code>（channel 的当前值）、<code>channel_versions</code>（每个 channel 的版本号）和 <code>versions_seen</code>（每个节点消费了哪个版本，这是确定性重放的关键）。</p>
+
+<p><code>BaseCheckpointSaver</code>（第 176 行）定义持久化接口，有四种方法：<code>get_tuple(config)</code> 获取 checkpoint、<code>put(...)</code> 存储、<code>put_writes(...)</code> 存储中间写入、<code>list(config)</code> 列举。Checkpoint 在执行生命周期的三个点写入：输入 checkpoint（<code>source="input"</code>）、循环 checkpoint（<code>source="loop"</code>，每次 superstep 后）、以及 fork checkpoint（<code>source="fork"</code>，从历史分支时）。</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">InMemorySaver</div><div class="fc-desc">基于 Dict，仅开发用。进程重启后不持久化。</div></div>
+  <div class="fc-box"><div class="fc-label">SqliteSaver</div><div class="fc-desc">单文件数据库。适合本地生产使用。</div></div>
+  <div class="fc-box"><div class="fc-label">PostgresSaver</div><div class="fc-desc">多进程，高可用。生产规模。</div></div>
+</div>
+
+<p><code>DeltaChannel</code> 将 checkpoint 存储从 O(N²) 优化到 O(N)，每 50 步快照一次，通过回溯祖先并重放增量写入来重建中间状态。这正是 deepagents 在 <code>graph.py:67</code> 中使用的机制。</p>
+
+<h2>interrupt()：暂停按钮</h2>
+
+<p><code>interrupt(value)</code> 位于 <code>langgraph/types.py:811</code>：抛出 <code>GraphInterrupt</code> → 持久化 checkpoint → 发出中断事件 → 客户端调用 <code>Command(resume=value)</code> 恢复。<code>Interrupt</code> 数据类（第 533 行）携带 <code>value</code> 和用于定向恢复的 <code>id</code>。这是两个课程一模式的基础设施：deepagents 的 <code>HumanInTheLoopMiddleware</code>（使用 <code>interrupt_on</code> 配置控制工具调用）和 deer-flow 的 <code>ClarificationMiddleware</code>（使用 <code>Command(goto=END)</code> 拦截澄清请求）。</p>
+
+<h2>8 种流模式</h2>
+
+<div class="tbl"><table>
+  <tr><th>模式</th><th>输出内容</th><th>用途</th></tr>
+  <tr><td><strong>values</strong></td><td>每次 superstep 后的完整状态</td><td>同步整个 UI 状态</td></tr>
+  <tr><td><strong>updates</strong></td><td>仅变更的 channel</td><td>高效增量同步</td></tr>
+  <tr><td><strong>messages</strong></td><td>逐 token 的 LLM 输出</td><td>聊天式流 UI</td></tr>
+  <tr><td><strong>custom</strong></td><td>任意 StreamWriter 事件</td><td>进度条、通知</td></tr>
+  <tr><td><strong>checkpoints</strong></td><td>保存后的 checkpoint 元数据</td><td>调试状态转换</td></tr>
+  <tr><td><strong>tasks</strong></td><td>任务生命周期事件</td><td>监控并行执行</td></tr>
+  <tr><td><strong>debug</strong></td><td>所有内部事件</td><td>开发和追踪</td></tr>
+  <tr><td><strong>tools</strong></td><td>工具调用事件</td><td>流式传输工具执行进度</td></tr>
+</table></div>
+
+<p>v3 流协议 <code>GraphRunStream</code> 位于 <code>stream/run_stream.py:31</code>，使用 <code>StreamMux</code> 将事件多路复用到多个投影。deer-flow 的 <code>worker.py:312</code> 使用 <code>agent.astream(input, stream_mode=["values", "messages"])</code>——values 模式用于完整状态快照，messages 模式用于增量文本。StreamBridge 将每个 LangGraph 流事件转换为前端的 SSE 事件。</p>
+
+<h2>练习</h2>
+
+<div class="quiz" id="quiz1"><h3>测验</h3>
+<p style="margin-bottom:0.8rem;">每题只有一个正确答案。</p>
+
+<div class="question">Q1. <code>interrupt()</code> 在图节点内被调用时会做什么？</div>
+<div class="options">
+  <div class="option" data-q="1" data-a="a">永久停止执行</div>
+  <div class="option" data-q="1" data-a="b">抛出 GraphInterrupt，持久化 checkpoint</div>
+  <div class="option" data-q="1" data-a="c">重试当前节点</div>
+  <div class="option" data-q="1" data-a="d">跳到下一个节点</div>
+</div>
+<div class="feedback" id="feedback1"></div>
+
+<div class="question">Q2. DeltaChannel 如何降低 checkpoint 存储增长？</div>
+<div class="options">
+  <div class="option" data-q="2" data-a="a">用 gzip 压缩</div>
+  <div class="option" data-q="2" data-a="b">每 N 步快照 + 重放</div>
+  <div class="option" data-q="2" data-a="c">删除旧 checkpoint</div>
+  <div class="option" data-q="2" data-a="d">使用外部云存储</div>
+</div>
+<div class="feedback" id="feedback2"></div>
+
+<div class="question">Q3. 哪种流模式提供逐 token 的 LLM 输出？</div>
+<div class="options">
+  <div class="option" data-q="3" data-a="a">values</div>
+  <div class="option" data-q="3" data-a="b">updates</div>
+  <div class="option" data-q="3" data-a="c">messages</div>
+  <div class="option" data-q="3" data-a="d">debug</div>
+</div>
+<div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function(){const a={1:'b',2:'b',3:'c'};document.querySelectorAll('.option').forEach(o=>{o.addEventListener('click',function(){const q=this.dataset.q,k=this.dataset.a,fb=document.getElementById('feedback'+q);this.parentElement.querySelectorAll('.option').forEach(s=>s.classList.remove('correct','wrong'));if(k===a[q]){this.classList.add('correct');fb.textContent='✓ 正确。';fb.style.color='#155724';}else{this.classList.add('wrong');fb.textContent='✗ 不对——请重读上面相关内容。';fb.style.color='#721c24';}});});})();
+</script>
+
+<h2>主要参考来源</h2>
+<ol>
+  <li><strong>Checkpoint</strong>：<code>checkpoint/base/__init__.py</code>——Checkpoint TypedDict（第 92 行），BaseCheckpointSaver（第 176 行）</li>
+  <li><strong>interrupt()</strong>：<code>langgraph/types.py</code>——interrupt()（第 811 行），Command（第 758 行）</li>
+  <li><strong>流式传输</strong>：<code>stream/run_stream.py</code>——GraphRunStream（第 31 行）</li>
+</ol>
+
+<div class="callout"><strong>欢迎提出后续问题。</strong>如果本课有任何不清楚的地方，请向你的 agent 老师提问。</div>
+
+<div class="nav">
+  <span><a href="0009-pregel-execution-model.html">&larr; 第9课：Pregel 模型</a></span>
+  <span><a href="0011-middleware-protocol-evolution.html">第11课：中间件演化 &rarr;</a></span>
+</div>
+
+<script src="../../assets/lang-switcher.js"></script>
+</body>
+</html>

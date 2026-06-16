@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第13课：工具驱动团队——AgentScope</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  :root { --bg: #fffff8; --text: #111; --muted: #666; --accent: #a00; --rule: #ddd; --code-bg: #f4f4f0; --highlight: #fffacd; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif; max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 6rem; background: var(--bg); color: var(--text); line-height: 1.5; }
+  h1 { font-size: 2rem; margin-bottom: 0.15rem; } h2 { font-size: 1.35rem; margin: 2.2rem 0 0.6rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; } h3 { font-size: 1.08rem; margin: 1.5rem 0 0.5rem; }
+  p { font-size: 0.95rem; margin-bottom: 0.8rem; } ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; } li { font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.25rem; } .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; font-style: italic; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; margin-bottom: 0.5rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.85rem; } th,td { padding: 0.45rem 0.55rem; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; background: #f8f8f0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; } tr:nth-child(even) td { background: #fafaf6; }
+  code { font-family: "SF Mono","Monaco","Menlo",monospace; font-size: 0.87rem; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; margin: 0.8rem 0 1.2rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.45; border-left: 3px solid var(--accent); } pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid var(--rule); padding-left: 1rem; margin: 1rem 0; color: var(--muted); font-style: italic; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .quiz { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1.5rem 0; } .quiz h3 { margin-top: 0; }
+  .quiz .question { margin: 1rem 0 0.5rem; font-weight: 600; } .quiz .options { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 1rem; }
+  .quiz .option { padding: 0.35rem 0.6rem; cursor: pointer; border: 1px solid var(--rule); background: #fff; font-size: 0.88rem; } .quiz .option:hover { background: var(--highlight); }
+  .quiz .option.correct { background: #d4edda; border-color: #28a745; } .quiz .option.wrong { background: #f8d7da; border-color: #dc3545; }
+  .quiz .feedback { margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.5rem; }
+  .callout { background: #fffacd; border: 1px solid #e6da8a; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav"><a href="../../lessons/0013-tool-driven-teams.html" data-lang="en">EN</a><span>/</span><a href="#" data-lang="zh">中文</a></nav>
+
+<h1>第13课：工具驱动团队——AgentScope</h1>
+<p class="subtitle">当团队管理只是另一个工具调用——AgentScope 对多 agent 协调的元认知方法。</p>
+<p class="meta">课程三：多 Agent 编排 · 2026年6月 · <a href="0013-tool-driven-teams.html">永久链接</a></p>
+
+<p><a href="0012-role-delegation-vs-conversational.html">第12课</a>讲解了多 agent 协调的两种方法。AgentScope（阿里巴巴，~23k stars）引入<strong>第三种范式</strong>：团队管理作为 agent 工具。主 agent 使用与文件操作和网络搜索相同的工具调用接口来创建、通信和销毁团队成员。这是一种元认知方法——agent <em>像推理其他任务一样推理团队结构</em>。</p>
+
+<p class="sidenote">AgentScope 在三个多 agent 框架中也是独一无二的——它同时是一个完整的单 agent harness，可以在独立 agent 和递归多 agent 系统之间无缝切换。</p>
+
+<h2>团队即工具：核心洞察</h2>
+
+<p>在 CrewAI 中，团队管理是一个独立的编排层（<code>Crew</code> 类）。在 AutoGen 中，它是一个独立的运行时（<code>GroupChat</code>）。在 AgentScope 中，<strong>它就是工具</strong>：</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">TeamCreate</div><div class="fc-desc">创建团队，调用者成为 leader</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">AgentCreate</div><div class="fc-desc">生成带有独立 session、toolkit、workspace 的 worker</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">TeamSay</div><div class="fc-desc">通过 MessageBus 发送消息</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">TeamDelete</div><div class="fc-desc">解散团队</div></div>
+</div>
+
+<p><code>TeamCreate</code>（<code>_tools/_team_create.py:30</code>）创建持久化团队记录。<code>AgentCreate</code>（<code>_tools/_agent_create.py:136</code>）使用 <code>SubAgentTemplate</code>（<code>_types.py:29</code>）生成完整的 worker agent——新的 session、toolkit、permission context、workspace。leader 通过 <code>prompt</code> 参数分配工作。这种倒转的控制模型意味着<strong>agent 通过工具管理自己的团队</strong>，而不是由框架管理 agent。</p>
+
+<h2>MessageBus：通信基础设施</h2>
+
+<p><code>MessageBus</code>（<code>message_bus/_base.py:49</code>）三种传输模式：Drain queue（单消费者，读取确认，用于每 session 收件箱）、Replay log（多消费者，游标跟踪，用于 SSE 事件重放）、Transient broadcast（即发即忘，用于唤醒信号）。<code>InboxMiddleware</code>（<code>app/middleware/_inbox_middleware.py:24</code>）在每次推理步骤前清空收件箱，将 <code>HintBlock</code> 对象注入 agent 上下文。</p>
+
+<h2>三种范式对比</h2>
+
+<div class="tbl"><table>
+  <tr><th>维度</th><th>CrewAI</th><th>AutoGen/MAF</th><th>AgentScope</th></tr>
+  <tr><td><strong>协调方式</strong></td><td>角色委派</td><td>对话</td><td>工具调用</td></tr>
+  <tr><td><strong>控制流</strong></td><td>自上而下（Crew）</td><td>自下而上（GroupChat）</td><td>元认知（agent 决定）</td></tr>
+  <tr><td><strong>通信方式</strong></td><td>AgentTools 委派</td><td>pub/sub 通过运行时</td><td>MessageBus（3 种模式）</td></tr>
+  <tr><td><strong>单 agent 能力</strong></td><td>是（基础 ReAct）</td><td>是（AssistantAgent）</td><td><strong>是（完整 harness）</strong></td></tr>
+  <tr><td><strong>Worker 隔离</strong></td><td>共享内存</td><td>运行时范围</td><td><strong>Session + Workspace</strong></td></tr>
+  <tr><td><strong>独特贡献</strong></td><td>Memory（RecallFlow）</td><td>Actor 运行时</td><td>团队即工具</td></tr>
+</table></div>
+
+<div class="callout"><strong>设计启发：</strong>团队结构已知时用 CrewAI（更简单）。结构从对话中涌现时用 AutoGen/MAF。当 agent 应该自己决定团队结构时用 AgentScope。元认知模型最强大——也最难预测。</div>
+
+<h2>练习</h2>
+
+<div class="quiz" id="quiz1"><h3>测验</h3>
+<p style="margin-bottom:0.8rem;">每题只有一个正确答案。</p>
+
+<div class="question">Q1. AgentScope 多 agent 方法的独特之处是什么？</div>
+<div class="options">
+  <div class="option" data-q="1" data-a="a">使用 HTTP 通信</div><div class="option" data-q="1" data-a="b">团队管理是 agent 工具</div>
+  <div class="option" data-q="1" data-a="c">仅支持 Python</div><div class="option" data-q="1" data-a="d">需要 Docker</div>
+</div>
+<div class="feedback" id="feedback1"></div>
+
+<div class="question">Q2. 哪种 MessageBus 模式用于 SSE 事件重放？</div>
+<div class="options">
+  <div class="option" data-q="2" data-a="a">Drain queue</div><div class="option" data-q="2" data-a="b">Replay log</div>
+  <div class="option" data-q="2" data-a="c">Transient broadcast</div><div class="option" data-q="2" data-a="d">WebSocket</div>
+</div>
+<div class="feedback" id="feedback2"></div>
+
+<div class="question">Q3. leader 如何在 AgentScope 中为生成的 worker 分配工作？</div>
+<div class="options">
+  <div class="option" data-q="3" data-a="a">通过 Crew 任务列表</div><div class="option" data-q="3" data-a="b">通过 GroupChat 发言者选择</div>
+  <div class="option" data-q="3" data-a="c">通过 AgentCreate 的 prompt 参数</div>
+  <div class="option" data-q="3" data-a="d">通过 REST API</div>
+</div>
+<div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function(){const a={1:'b',2:'b',3:'c'};document.querySelectorAll('.option').forEach(o=>{o.addEventListener('click',function(){const q=this.dataset.q,k=this.dataset.a,fb=document.getElementById('feedback'+q);this.parentElement.querySelectorAll('.option').forEach(s=>s.classList.remove('correct','wrong'));if(k===a[q]){this.classList.add('correct');fb.textContent='✓ 正确。';fb.style.color='#155724';}else{this.classList.add('wrong');fb.textContent='✗ 不对。';fb.style.color='#721c24';}});});})();
+</script>
+
+<h2>主要参考来源</h2>
+<ol>
+  <li><strong>AgentScope Agent</strong>：<code>_agent.py</code>——Agent 类，第 94 行；_reply_impl()，第 542 行</li>
+  <li><strong>TeamCreate</strong>：<code>_tools/_team_create.py</code>——TeamCreate，第 30 行</li>
+  <li><strong>AgentCreate</strong>：<code>_tools/_agent_create.py</code>——AgentCreate，第 136 行</li>
+  <li><strong>MessageBus</strong>：<code>message_bus/_base.py</code>——MessageBus，第 49 行</li>
+</ol>
+
+<div class="callout"><strong>欢迎提出后续问题。</strong>课程三到此结束。如果有任何不清楚的地方，或者想深入探讨某个特定框架，请向你的 agent 老师提问。</div>
+
+<div class="nav">
+  <span><a href="0012-role-delegation-vs-conversational.html">&larr; 第12课：角色 vs 会话式</a></span>
+  <span><a href="../reference/agent-harness-dimensions.html">参考：架构维度 &rarr;</a></span>
+</div>
+
+<script src="../../assets/lang-switcher.js"></script>
+</body>
+</html>
