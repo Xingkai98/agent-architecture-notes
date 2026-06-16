@@ -23,8 +23,8 @@
 </nav>
 
 <h1>第5课：记忆架构</h1>
-<p class="subtitle">working、short-term、long-term —— 每个 agent 必须管理的三层记忆体系，以及七个代码库如何实现（或不实现）。</p>
-<p class="meta">2026年6月 · 7 个主要源代码库 · <a href="0005-memory-architecture.html">固定链接</a></p>
+<p class="subtitle">working、short-term、long-term —— 每个 agent 必须管理的三层记忆体系，以及九个代码库如何实现（或不实现）。</p>
+<p class="meta">2026年6月 · 9 个主要源代码库 · <a href="0005-memory-architecture.html">固定链接</a></p>
 
 <p class="sidenote">记忆是将无状态 API 调用与一个随时间<em>学习并改进的</em> agent 区分开来的关键。每个 agent 都面临同样的根本问题：LLM 上下文窗口是有限的，但对话、文件和经验是无界的。解决方案始终是分层架构 —— 但实现方式从完整的三层编排到"我们直接往 JSONL 里写数据就完事了"不等。</p>
 
@@ -157,7 +157,7 @@ class MemoryStore:
     self.history_jsonl = root_dir / "history.jsonl" # 整理后的日志
     self.cursor        = 0                          # 最后一次整理的位置</code></pre>
 
-<p><strong>SOUL.md</strong> 文件在所有 7 个代码库中是独一无二的——它定义了 agent 的个性和行为约束，与事实记忆（MEMORY.md）和用户偏好（USER.md）分开。这种三部分划分（身份、事实、偏好）是一种干净的分离，其他代码库将其混在更少的文件中。</p>
+<p><strong>SOUL.md</strong> 文件在所有 9 个代码库中是独一无二的——它定义了 agent 的个性和行为约束，与事实记忆（MEMORY.md）和用户偏好（USER.md）分开。这种三部分划分（身份、事实、偏好）是一种干净的分离，其他代码库将其混在更少的文件中。</p>
 
 <h3>Consolidator：增量 LLM 摘要</h3>
 
@@ -221,16 +221,114 @@ pub struct MemoryStore {
 
 <p>OpenCode 的 <code>packages/app/src/utils/persist.ts</code> 将 UI 状态持久化到 localStorage——如面板宽度、排序顺序和筛选偏好。完全没有 agent 记忆系统。持久化纯粹是针对面向用户的 UI，而非 agent 的知识。这与 OpenCode 定位为轻量编码助手而非持久化 agent 是一致的。</p>
 
+<h2>记忆作为中间件：DeepAgents 与 DeerFlow</h2>
+
+<p>两个代码库因一个统一的架构决策而脱颖而出：它们将记忆作为<strong>一等中间件关注点</strong>，而非附加在 agent 循环上的临时功能。DeepAgents 和 DeerFlow 都将记忆实现为拦截请求/响应管道的中间件——记忆在 LLM 调用之前加载，在调用之后提取，且从不阻塞主循环。</p>
+
+<p>这是值得关注的关键架构模式：当记忆是中间件时，它<em>在每一轮中都会被保证执行</em>。当记忆是 agent 循环中的临时代码时，很容易被跳过、遗忘或绕过。中间件通过设计强制执行记忆卫生——你不可能意外遗漏 prefetch 或忘记 consolidation，因为中间件层是无条件运行的。</p>
+
+<div class="callout">
+  <strong>"存在于 agent 循环中的记忆是可选的。存在于中间件中的记忆是强制性的。"</strong> 将记忆逻辑嵌入 agent 的 turn 函数中还是将其注册为中间件，这个架构选择决定了记忆是一等关注点还是事后才考虑的东西。DeepAgents 和 DeerFlow 都选择了中间件，因此都拥有更丰富的记忆系统。
+</div>
+
+<h2>DeepAgents：通过 CompositeBackend 实现分层存储</h2>
+
+<p>DeepAgents 采用后端抽象的方法来处理记忆。它定义了一个 <strong>CompositeBackend</strong>，按命名空间前缀将记忆操作路由到三个专用后端——每个后端具有不同的持久化保证和生命周期。</p>
+
+<h3>三个后端，一个路由器</h3>
+
+<p><code>backends/composite.py</code> 中的 <code>CompositeBackend</code> 充当类似 URL 路由器的记忆操作分发器，按命名空间前缀进行路由：</p>
+
+<pre><code># backends/composite.py — 基于前缀路由到三个后端
+class CompositeBackend:
+  def route(self, namespace):
+    prefix = namespace[0] if namespace else ""
+    if prefix == "memories":
+      return self.store_backend     # 跨会话，持久化
+    elif prefix == "data":
+      return self.filesystem_backend # 磁盘支持，持久化
+    else:
+      return self.state_backend      # 线程内部，临时性</code></pre>
+
+<p>三个后端服务于不同的目的：</p>
+
+<ul>
+  <li><strong>StateBackend</strong>（<code>backends/state.py:38</code>）：线程内部的临时存储，使用 LangGraph 状态通道。数据通过 LangGraph 检查点在单个线程内持久化，但对其他线程不可见。最适合：对话草稿数据、不需要跨会话边界的运行中计算结果。</li>
+  <li><strong>StoreBackend</strong>（<code>backends/store.py:172</code>）：通过 LangGraph 的 BaseStore 实现跨会话持久化存储，命名空间隔离。支持两种编码格式：v1（字符串列表）和 v2（字符串 + 编码字段，用于更丰富的元数据）。最适合：事实、偏好、必须跨会话边界存活的学习知识。</li>
+  <li><strong>FilesystemBackend</strong>：磁盘支持的存储，用于大型或人类可读的数据。最适合：文件、文档、用户可能想要直接查看或编辑的任何产物。</li>
+</ul>
+
+<p>这种命名空间前缀路由是一种干净的架构模式：调用者通过命名空间指定意图，CompositeBackend 透明地路由到正确的存储层。代码库中没有分散的 if-else 链，没有魔法常量——只有命名空间驱动的、所有权清晰的分发。</p>
+
+<h3>MemoryMiddleware：AGENTS.md 注入</h3>
+
+<p><code>middleware/memory.py:180-441</code> 中的 <code>MemoryMiddleware</code> 处理记忆注入到 agent 上下文中。在 <code>before_agent()</code>（第 303 行）中，它通过配置的后端加载 <code>AGENTS.md</code> 文件。然后在 <code>modify_request()</code>（第 371 行）中将它们以 <code>&lt;agent_memory&gt;...&lt;/agent_memory&gt;</code> XML 标签的形式注入到 system prompt 中。加载每个会话仅执行一次——DeepAgents 将 AGENTS.md 视为会话内稳定的上下文，而非每轮都需要重新读取的内容。</p>
+
+<h2>DeerFlow：完整记忆生命周期</h2>
+
+<p>DeerFlow 可以说是所有九个代码库中最复杂的记忆系统。它实现了完整的记忆生命周期：<strong>检测 &rarr; 排队 &rarr; 提取 &rarr; 写入 &rarr; 注入</strong>，每一步都由 LLM 驱动的智能所支持，而非启发式规则。</p>
+
+<h3>记忆结构：上下文、历史和置信度评分的事实</h3>
+
+<p><code>agents/memory/storage.py:24</code> 中的记忆模型将知识组织为三层：</p>
+
+<pre><code># agents/memory/storage.py:24 — 记忆结构
+{
+  "context": {
+    "workContext": "...",       # 用户的职业上下文
+    "personalContext": "...",   # 个人兴趣、偏好
+    "topOfMind": "..."          # 当前相关的内容
+  },
+  "history": {
+    "recentMonths": "...",      # 压缩的近期历史
+    "earlierContext": "...",    # 更早的、更概括的历史
+    "longTermBackground": "..." # 基础的、很少变化的内容
+  },
+  "facts": [
+    {
+      "id": "uuid",
+      "content": "事实文本",
+      "category": "...",
+      "confidence": 0.85,       # 0–1 置信度评分
+      "createdAt": "iso8601",
+      "source": "产生此事实的对话轮次"
+    }
+  ]
+}</code></pre>
+
+<p>每条事实都带有一个<strong>置信度评分</strong>（0–1）。这是关键的设计决策：高置信度的事实被积极注入；低置信度的事实被保留或修剪。基于置信度的修剪意味着记忆系统自我清理——从未被强化的事实自然而然地消失，无需 cron 任务或手动策展。</p>
+
+<h3>存储：基于 mtime 缓存的每用户 JSON</h3>
+
+<p><code>agents/memory/storage.py:62</code> 中的 <code>FileMemoryStorage</code> 将记忆存储为每个用户一个 JSON 文件，位于 <code>{base_dir}/users/{user_id}/memory.json</code>，或按 agent 划分的 <code>users/{user_id}/agents/{agent_name}/memory.json</code>。文件通过<strong>mtime 失效机制</strong>缓存在内存中——如果文件的修改时间发生变化，缓存会被刷新。这对于单写入者场景是安全的，同时避免了数据库的复杂性。</p>
+
+<h3>记忆提取流水线：检测、排队、提取、注入</h3>
+
+<ol>
+  <li><strong>检测</strong>（<code>agents/middlewares/memory_middleware.py:28</code>）：<code>MemoryMiddleware</code> 将对话流过滤为<em>仅用户输入 + 最终 AI 回复</em>——没有中间工具调用，没有思考追踪。它检测纠正和强化信号（例如，"其实，我的意思是……"或"记住……"）作为触发立即记忆更新的信号。</li>
+  <li><strong>排队</strong>（<code>agents/memory/queue.py:28</code>）：<code>MemoryUpdateQueue</code> 提供每线程去重，可配置 debounce（默认 30 秒）。后台处理使用 <code>threading.Timer</code>，在入队时捕获 user_id。快速连续的消息不会触发冗余的提取运行——队列会合并它们。</li>
+  <li><strong>提取</strong>（<code>agents/memory/updater.py:380</code>）：<code>MemoryUpdater</code> 是 LLM 驱动的。<code>update_memory()</code>（第 539 行）是同步路径，在异步上下文中被卸载到线程池。<code>_apply_updates()</code>（第 600 行）处理上下文变更、事实添加/删除和基于置信度的修剪。LLM 决定什么是事实、属于什么类别以及置信度是多少——没有正则表达式，没有关键词匹配。</li>
+  <li><strong>注入</strong>：通过 <code>DynamicContextMiddleware</code>，前 15 条事实加上上下文以 <code>&lt;memory&gt;</code> 标签注入到 system prompt 中，受 token 计数预算控制（tiktoken 或基于字符的备选方案），默认 <code>max_injection_tokens</code> 上限为 2,000。</li>
+</ol>
+
+<h3>为什么 DeerFlow 的设计值得关注</h3>
+
+<p>基于置信度的事实模型和自动修剪意味着 DeerFlow 的记忆是自我维护的。从未被强化的低置信度事实被修剪；积累支持证据的高置信度事实则保留。这是所有九个代码库中唯一将记忆置信度视为具有自动生命周期后果的一等维度的系统——hermes-agent 的 curator 管理 skill 生命周期（基于时间），但 DeerFlow 管理事实生命周期（基于证据）。</p>
+
+<p>带去重的 debounced 队列也是独特的。其他代码库要么在每一轮都运行 consolidation（hermes-agent），要么在固定的冷却时间内运行（Codex）。DeerFlow 的 debounce 是自适应的——它仅在对话稳定后才运行提取，在不丢失信息的情况下减少 LLM 成本。</p>
+
 <h2>对比表格</h2>
 
 <table>
-  <tr><th>维度</th><th>hermes-agent</th><th>claude-code</th><th>nanobot</th><th>codex</th><th>pi-mono</th><th>openclaw</th><th>opencode</th></tr>
+  <tr><th>维度</th><th>hermes-agent</th><th>claude-code</th><th>nanobot</th><th>codex</th><th>deepagents</th><th>deerflow</th><th>pi-mono</th><th>openclaw</th><th>opencode</th></tr>
   <tr>
     <td><strong>Working memory</strong></td>
     <td>注入 system prompt 块</td>
     <td>四层 CLAUDE.md 合并</td>
     <td>MEMORY.md + USER.md + SOUL.md</td>
     <td>上下文内目标状态</td>
+    <td>AGENTS.md 通过 &lt;agent_memory&gt; XML 注入</td>
+    <td>前 15 条事实通过 &lt;memory&gt; 标签注入</td>
     <td>无（消息数组）</td>
     <td>无（消息数组）</td>
     <td>无（仅聊天）</td>
@@ -241,6 +339,8 @@ pub struct MemoryStore {
     <td>会话 markdown 笔记</td>
     <td>history.jsonl（基于游标）</td>
     <td>State DB + Logs DB</td>
+    <td>StateBackend（每线程，checkpointed）</td>
+    <td>每用户 JSON（mtime 缓存）</td>
     <td>JSONL 会话转储</td>
     <td>JSONL 会话转储</td>
     <td>无</td>
@@ -251,6 +351,8 @@ pub struct MemoryStore {
     <td>MEMORY.md（~/.claude/memdir）</td>
     <td>MEMORY.md + SOUL.md（Git 支持）</td>
     <td>memories_1.sqlite</td>
+    <td>StoreBackend（BaseStore）+ FilesystemBackend</td>
+    <td>FileMemoryStorage（每用户 JSON）</td>
     <td>无</td>
     <td>可选 SDK（SQLite + embedding）</td>
     <td>无</td>
@@ -261,6 +363,8 @@ pub struct MemoryStore {
     <td>Forked subagent，阈值门控</td>
     <td>增量 LLM 摘要</td>
     <td>两阶段：线程级 + 全局（6h 冷却）</td>
+    <td>无（每会话一次性加载 AGENTS.md）</td>
+    <td>LLM 驱动提取 + 置信度修剪 + debounced 队列（30s）</td>
     <td>无</td>
     <td>默认不启用</td>
     <td>无</td>
@@ -274,6 +378,8 @@ pub struct MemoryStore {
     <td>无</td>
     <td>无</td>
     <td>无</td>
+    <td>无</td>
+    <td>无</td>
   </tr>
   <tr>
     <td><strong>搜索</strong></td>
@@ -281,6 +387,8 @@ pub struct MemoryStore {
     <td>文件 glob + grep</td>
     <td>基于游标的增量</td>
     <td>SQL 查询</td>
+    <td>命名空间路由的后端查询</td>
+    <td>JSON 字段访问（无全文索引）</td>
     <td>无</td>
     <td>Embedding（可选）</td>
     <td>无</td>
@@ -291,6 +399,8 @@ pub struct MemoryStore {
     <td>四层 CLAUDE.md 合并</td>
     <td>SOUL.md 身份文件 + Git 版本控制</td>
     <td>四数据库分离 + 冷却门控</td>
+    <td>三后端 CompositeBackend 配合前缀路由</td>
+    <td>置信度评分事实 + 自动修剪 + debounced 队列</td>
     <td>零记忆设计</td>
     <td>选择性接入 SDK 架构</td>
     <td>仅 UI 持久化</td>
@@ -317,6 +427,10 @@ pub struct MemoryStore {
 
 <div class="callout">
   <strong>"安全的切割点对连贯性很重要。"</strong> Nanobot 的 consolidator 仅在用户轮次边界处分割。Codex 将线程内的 consolidation 与全局 consolidation 分开。两者都认识到任意截断会产生不连贯的摘要。切割点必须尊重对话结构。
+</div>
+
+<div class="callout">
+  <strong>"记忆作为中间件——保证在每一轮中执行。"</strong> DeepAgents 和 DeerFlow 都将记忆作为一等中间件关注点。当记忆是中间件时，它在每一轮中都会被保证执行——你不可能意外跳过 prefetch 或忘记 consolidation。当记忆是 agent 循环中的临时代码时，很容易被绕过。记忆代码的架构位置（中间件层 vs. turn 函数体）直接决定了记忆系统的可靠性。
 </div>
 
 <h2>为什么 pi-mono 没有记忆</h2>
@@ -374,11 +488,38 @@ pub struct MemoryStore {
     <div class="option" data-q="5" data-a="d">仅手动触发</div>
   </div>
   <div class="feedback" id="feedback5"></div>
+
+  <div class="question">Q6. 哪个代码库使用 CompositeBackend 按命名空间前缀将记忆操作路由到三个专用后端（State/Store/Filesystem）？</div>
+  <div class="options">
+    <div class="option" data-q="6" data-a="a">hermes-agent</div>
+    <div class="option" data-q="6" data-a="b">deepagents</div>
+    <div class="option" data-q="6" data-a="c">deerflow</div>
+    <div class="option" data-q="6" data-a="d">codex</div>
+  </div>
+  <div class="feedback" id="feedback6"></div>
+
+  <div class="question">Q7. 哪个代码库实现了带置信度评分（0–1）的事实模型并配合自动修剪——从未被强化的低置信度事实会自然消失？</div>
+  <div class="options">
+    <div class="option" data-q="7" data-a="a">hermes-agent</div>
+    <div class="option" data-q="7" data-a="b">nanobot</div>
+    <div class="option" data-q="7" data-a="c">deerflow</div>
+    <div class="option" data-q="7" data-a="d">deepagents</div>
+  </div>
+  <div class="feedback" id="feedback7"></div>
+
+  <div class="question">Q8. 哪两个代码库将记忆作为一等中间件关注点，保证记忆操作在每一轮中都会执行？</div>
+  <div class="options">
+    <div class="option" data-q="8" data-a="a">hermes-agent + codex</div>
+    <div class="option" data-q="8" data-a="b">deepagents + deerflow</div>
+    <div class="option" data-q="8" data-a="c">claude-code + nanobot</div>
+    <div class="option" data-q="8" data-a="d">pi-mono + openclaw</div>
+  </div>
+  <div class="feedback" id="feedback8"></div>
 </div>
 
 <script>
 (function() {
-  var answers = { 1: 'c', 2: 'b', 3: 'c', 4: 'c', 5: 'c' };
+  var answers = { 1: 'c', 2: 'b', 3: 'c', 4: 'c', 5: 'c', 6: 'b', 7: 'c', 8: 'b' };
   document.querySelectorAll('.option').forEach(function(opt) {
     opt.addEventListener('click', function() {
       var q = this.dataset.q;
@@ -402,7 +543,7 @@ pub struct MemoryStore {
 
 <h2>我们没有涵盖的内容</h2>
 <ul>
-  <li><strong>用于语义记忆搜索的向量 embedding</strong> —— openclaw 的可选 SDK 支持此功能，但默认未使用。基于语义搜索记忆是一个不断发展的领域，但目前只有 openclaw 提供了该能力。</li>
+  <li><strong>用于语义记忆搜索的向量 embedding</strong> —— openclaw 的可选 SDK 支持此功能；DeerFlow 使用基于 tiktoken 的 token 计数进行注入预算，但未使用 embedding 进行检索。基于语义搜索记忆是一个不断发展的领域。</li>
   <li><strong>多 agent 系统中的记忆</strong> —— 当多个 agent 协作时，记忆如何共享或分区。在<a href="0008-multi-agent.html">第8课</a>中涵盖。</li>
   <li><strong>从上下文中驱逐记忆</strong> —— 一旦记忆被注入到 working memory 中，何时移除它？在<a href="0003-context-management.html">第3课</a>中涵盖。</li>
 </ul>
@@ -413,6 +554,8 @@ pub struct MemoryStore {
   <li><strong>claude-code</strong>：<code>src/utils/claudemd.ts</code>（四层 CLAUDE.md 加载器）、<code>src/memdir/</code>（MEMORY.md 系统）、<code>src/services/SessionMemory/sessionMemory.ts</code>（会话笔记）、consolidation subagent（forked process，阈值门控）</li>
   <li><strong>nanobot</strong>：<code>nanobot/agent/memory.py:40</code>（MemoryStore）、<code>:602</code>（Consolidator）、<code>nanobot/autocompact.py:17</code>（AutoCompact）、GitStore（SOUL.md、USER.md、MEMORY.md 版本控制）</li>
   <li><strong>codex</strong>：<code>codex-rs/state/src/runtime/memories.rs:28</code>（MemoryStore）、4 个 SQLite 数据库（state、logs、goals、memories_1.sqlite）、两阶段提取（线程级 + 全局，6h 冷却）</li>
+  <li><strong>deepagents</strong>：<code>middleware/memory.py:180-441</code>（MemoryMiddleware）、<code>backends/composite.py</code>（CompositeBackend）、<code>backends/state.py:38</code>（StateBackend）、<code>backends/store.py:172</code>（StoreBackend）、FilesystemBackend</li>
+  <li><strong>deerflow</strong>：<code>agents/memory/storage.py:24</code>（记忆结构）、<code>:62</code>（FileMemoryStorage）、<code>agents/memory/updater.py:380</code>（MemoryUpdater）、<code>:539</code>（update_memory）、<code>:600</code>（_apply_updates）、<code>agents/memory/queue.py:28</code>（MemoryUpdateQueue）、<code>agents/middlewares/memory_middleware.py:28</code>（MemoryMiddleware）</li>
   <li><strong>pi-mono</strong>：仅 JSONL 会话文件 —— 无 MEMORY.md、无 consolidation、无 skill 学习、无跨会话记忆</li>
   <li><strong>openclaw</strong>：Memory Host SDK（SQLite + 可选 embedding）—— 可用但默认未使用</li>
   <li><strong>opencode</strong>：<code>packages/app/src/utils/persist.ts</code> —— 仅 UI 状态的 localStorage，无 agent 记忆系统</li>
@@ -421,6 +564,8 @@ pub struct MemoryStore {
 <h2>推荐下一步阅读</h2>
 <ul>
   <li>如果你想要<strong>最复杂</strong>的记忆系统：追踪 <code>hermes-agent/agent/memory_manager.py</code> 和 <code>hermes_state.py</code> —— 带有 FTS5 的 prefetch-inject-sync 流水线是黄金标准。</li>
+  <li>如果你想要<strong>最完整的记忆生命周期</strong>：研究 <code>deerflow/agents/memory/</code> —— 带有置信度评分事实和 debounced 排队的 detect-queue-extract-inject 流水线是所有九个代码库中最全面的。</li>
+  <li>如果你想要<strong>干净的分层存储架构</strong>：阅读 <code>deepagents/backends/composite.py</code> 和 <code>backends/store.py</code> —— 带有命名空间前缀路由到三个后端的 CompositeBackend 是分离存储关注点的优雅模式。</li>
   <li>如果你想要<strong>最实用</strong>的模式：阅读 <code>nanobot/nanobot/agent/memory.py</code> —— 带有基于游标的增量摘要的 Consolidator 是干净、可测试且易于采纳的。</li>
   <li>如果你想要<strong>简单且可行的</strong>：研究 Claude Code 的 <code>src/memdir/</code> —— 带有 @include 指令和大小限制的基于文件的 MEMORY.md 是最小化且久经考验的。</li>
 </ul>

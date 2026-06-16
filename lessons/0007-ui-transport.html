@@ -23,9 +23,9 @@
 
 <h1>Lesson 0007: UI / Transport Layers</h1>
 <p class="subtitle">TUI frameworks, client/server splits, and multi-channel adapters — how agents talk to the world.</p>
-<p class="meta">June 2026 · 7 primary source codebases · <a href="0007-ui-transport.html">Permalink</a></p>
+<p class="meta">June 2026 · 9 primary source codebases · <a href="0007-ui-transport.html">Permalink</a></p>
 
-<p class="sidenote">Every agent needs a surface. For some that surface is a terminal (<strong>Claude Code</strong>, <strong>Pi-mono</strong>, <strong>Codex</strong>, <strong>Opencode</strong>). For others it is a messaging app (<strong>OpenClaw</strong> with 24 channels, <strong>Nanobot</strong> with 18). For still others it is a desktop app or API server. The choice of transport layer shapes everything above it: how tools render results, how streaming works, how errors surface to the user.</p>
+<p class="sidenote">Every agent needs a surface. For some that surface is a terminal (<strong>Claude Code</strong>, <strong>Pi-mono</strong>, <strong>Codex</strong>, <strong>Opencode</strong>, <strong>DeepAgents</strong>). For others it is a messaging app (<strong>OpenClaw</strong> with 24 channels, <strong>Nanobot</strong> with 18, <strong>DeerFlow</strong> with 7). For still others it is a desktop app, web UI, or API server. The choice of transport layer shapes everything above it: how tools render results, how streaming works, how errors surface to the user.</p>
 
 <p>In <a href="0002-tool-system.html">Lesson 0002</a>, we saw how tools are defined, registered, dispatched, and normalized. This lesson moves one layer up: <em>how those tool results reach the user</em>, and how the user's input reaches the agent. We'll survey the full interface paradigm spectrum, compare six TUI implementations in detail, examine client/server architectures, and map the multi-channel landscape.</p>
 
@@ -99,7 +99,7 @@ from prompt_toolkit.key_binding import KeyBindings
 
 <h2>Client/Server splits</h2>
 
-<p>Three codebases separate the agent process from the UI process — a design choice that enables remote operation, headless deployment, and multiple frontends:</p>
+<p>Four codebases separate the agent process from the UI process — a design choice that enables remote operation, headless deployment, and multiple frontends:</p>
 
 <h3>Opencode: Web Worker server + RPC + TUI client</h3>
 
@@ -113,9 +113,15 @@ from prompt_toolkit.key_binding import KeyBindings
 
 <p>OpenClaw defines a formal gateway protocol at <code>packages/gateway-protocol/</code> with a corresponding <code>gateway-client/</code> package. The protocol specifies message formats, authentication, and transport — any client that speaks the protocol can drive the agent. This is a step beyond Codex's ad-hoc client/server split: the protocol is versioned, documented, and reusable.</p>
 
+<h3>DeepAgents: CLI + LangGraph Server</h3>
+
+<p>DeepAgents takes a modular approach to transport, offering three distinct surfaces built on LangGraph's infrastructure. The primary developer interface is <code>dcode</code>, a CLI tool installable via <code>curl -LsSf https://langch.in/dcode | bash</code>. Its standout feature is the interactive <code>/model</code> command, which lets users switch LLM providers mid-conversation without restarting the session. Configuration lives at <code>~/.deepagents/config.toml</code>.</p>
+
+<p>For programmatic use, the Python SDK's <code>create_deep_agent()</code> returns a <code>CompiledStateGraph</code> — a LangGraph graph that can be invoked directly in-process or served via LangGraph Server. The server exposes a standard LangGraph-compatible REST API for remote invocation. Streaming inherits all 8 LangGraph stream modes: <code>values</code>, <code>updates</code>, <code>messages</code>, <code>custom</code>, <code>checkpoints</code>, <code>tasks</code>, <code>debug</code>, and <code>tools</code>. This is the simplest transport model in the set — DeepAgents doesn't build its own protocol or message bus. It inherits LangGraph's battle-tested streaming and multi-mode infrastructure, trading architectural complexity for a mature, well-documented foundation.</p>
+
 <h2>Multi-channel (messaging bots)</h2>
 
-<p>Two codebases go far beyond terminal UIs — they are messaging platforms first, agents second:</p>
+<p>Three codebases go far beyond terminal UIs — they are messaging platforms first, agents second:</p>
 
 <h3>OpenClaw: 24 channels</h3>
 
@@ -137,6 +143,21 @@ class BaseChannel(ABC):
 # Messages arrive on the bus as a normalized type; the bus routes them to the agent.
 # Responses go back through the bus; the channel adapter formats them for its platform.</code></pre>
 
+<h3>DeerFlow: 7 IM platforms + Web UI + embedded client</h3>
+
+<p>DeerFlow has the most sophisticated multi-channel transport architecture of all nine codebases. The transport layer is a first-class architectural dimension — not a bolt-on — with four independent surfaces:</p>
+
+<ul>
+  <li><strong>Message Gateway:</strong> Native support for Telegram, Slack, Feishu/Lark, Discord, DingTalk, WeChat, and WeCom — no public IP or webhook tunnel required.</li>
+  <li><strong>Web UI:</strong> A Next.js frontend served through nginx at port 2026, layered over a FastAPI Gateway API at port 8001 with REST endpoints for threads, runs, models, MCP, skills, memory, uploads, artifacts, suggestions, feedback, and channels.</li>
+  <li><strong>Embedded client:</strong> <code>DeerFlowClient</code> provides direct in-process access without standing up any HTTP services — useful for scripting, testing, and programmatic orchestration.</li>
+  <li><strong>LangGraph-compatible endpoint:</strong> Nginx routes <code>/api/langgraph/*</code> to the Gateway runtime at port 8001, enabling standard LangGraph clients to connect.</li>
+</ul>
+
+<p>The IM Channels system (<code>app/channels/</code>) is architecturally the most interesting part. It is built on a <strong>MessageBus</strong> — an async pub/sub layer that decouples the agent from any specific platform. Per-platform implementations handle platform-specific behaviors: Feishu/Lark adapters patch cards in-place (updating a single message as the agent progresses rather than posting new ones), while the Telegram adapter edits a "Working on it..." placeholder message. User-owned channel bindings are managed through <code>channel_connections</code>, allowing each user to connect their own accounts without sharing a single bot identity.</p>
+
+<p>SSE streaming uses a <strong>StreamBridge</strong> (worker.py line 317): <code>bridge.publish(run_id, sse_event, ...)</code> delivers events to all connected clients. The full nginx routing table is: <code>/api/langgraph/*</code> → Gateway runtime (8001), <code>/api/*</code> → Gateway API (8001), <code>/</code> → Frontend (3000).</p>
+
 <h3>Hermes-agent: Desktop + CLI</h3>
 
 <p>Hermes-agent takes a different approach: a desktop Electron app at <code>apps/desktop/</code> built with React + Vite, plus a <code>cli.py</code> for terminal use. The desktop app provides a graphical chat interface while the CLI serves scripting and power users. This is the only codebase in the set that ships a GUI.</p>
@@ -154,7 +175,7 @@ class BaseChannel(ABC):
 
 <h2>Interesting design choices</h2>
 
-<p>Four implementation details worth studying:</p>
+<p>Five implementation details worth studying:</p>
 
 <p><strong>Claude Code's Ink fork:</strong> The TUI IS the application. <code>Messages.tsx</code> at 147KB is not a "view layer" — it is the core user experience. Tool results, streaming text, permissions prompts, and mode indicators all render through React components. The fork exists because no off-the-shelf terminal UI library handles streaming agent conversations at this scale.</p>
 
@@ -163,6 +184,8 @@ class BaseChannel(ABC):
 <p><strong>OpenClaw's channel catalog:</strong> <code>dist/channel-catalog.json</code> is generated at build time from extension manifests. This means the agent knows its available channels before starting — no runtime scanning, no dynamic imports, no race conditions. It is a small touch that eliminates an entire class of startup bugs.</p>
 
 <p><strong>Nanobot's OpenAI-compatible API server:</strong> <code>api/server.py</code> is a thin aiohttp wrapper that exposes <code>/v1/chat/completions</code>. This means any tool that can call the OpenAI API — langchain, openai-python, curl — can drive Nanobot without knowing it is not talking to OpenAI. The agent becomes a drop-in replacement.</p>
+
+<p><strong>DeerFlow's four-surface architecture:</strong> No other codebase exposes the agent through four independent transport surfaces simultaneously — IM gateway (7 platforms), web UI (Next.js), REST API (FastAPI), and embedded client (in-process). The IM channel system is not a plugin directory but a structured MessageBus with per-platform adapters that handle platform-specific rendering (in-place card patching for Feishu, placeholder editing for Telegram). This design treats the channel layer as an architectural peer to the agent core, not as an add-on.</p>
 
 <h2>Comparative table</h2>
 
@@ -175,6 +198,8 @@ class BaseChannel(ABC):
   <tr><td>Opencode</td><td>TUI + Web-capable</td><td>OpenTUI + Solid.js</td><td>Yes (Worker + RPC + HTTP)</td><td>No</td><td>Reactive JSX (signals)</td></tr>
   <tr><td>Nanobot</td><td>TUI + Multi-channel + API</td><td>prompt_toolkit + rich</td><td>No (monolith)</td><td>Yes (18 channels)</td><td>Prompt loop + rich formatting</td></tr>
   <tr><td>OpenClaw</td><td>Daemon + Multi-channel</td><td>None (headless gateway)</td><td>Yes (gateway protocol)</td><td>Yes (24 channels)</td><td>N/A (message bus output)</td></tr>
+  <tr><td>DeepAgents</td><td>CLI + LangGraph Server API</td><td>None (Click/argparse CLI)</td><td>Yes (LangGraph Server)</td><td>No</td><td>LangGraph stream modes (8 modes)</td></tr>
+  <tr><td>DeerFlow</td><td>Web UI + Multi-channel + Embedded + REST</td><td>None (Next.js + IM channels)</td><td>Yes (nginx → Gateway + Frontend)</td><td>Yes (7 IM platforms)</td><td>SSE streaming via StreamBridge</td></tr>
 </table>
 
 <h2>Design heuristics</h2>
@@ -222,11 +247,29 @@ class BaseChannel(ABC):
     <div class="option" data-q="3" data-a="d">Webhook-based fan-in</div>
   </div>
   <div class="feedback" id="feedback3"></div>
+
+  <div class="question">Q4. Which codebase has the most sophisticated multi-channel transport, with 7 IM platforms plus a web UI, REST API, and embedded client all as first-class surfaces?</div>
+  <div class="options">
+    <div class="option" data-q="4" data-a="a">OpenClaw</div>
+    <div class="option" data-q="4" data-a="b">Nanobot</div>
+    <div class="option" data-q="4" data-a="c">DeerFlow</div>
+    <div class="option" data-q="4" data-a="d">Hermes-agent</div>
+  </div>
+  <div class="feedback" id="feedback4"></div>
+
+  <div class="question">Q5. Which codebase provides an interactive CLI command (<code>/model</code>) that switches LLM providers mid-conversation?</div>
+  <div class="options">
+    <div class="option" data-q="5" data-a="a">Claude Code</div>
+    <div class="option" data-q="5" data-a="b">DeepAgents</div>
+    <div class="option" data-q="5" data-a="c">Pi-mono</div>
+    <div class="option" data-q="5" data-a="d">Codex</div>
+  </div>
+  <div class="feedback" id="feedback5"></div>
 </div>
 
 <script>
 (function() {
-  var answers = { 1: 'b', 2: 'b', 3: 'c' };
+  var answers = { 1: 'b', 2: 'b', 3: 'c', 4: 'c', 5: 'b' };
   document.querySelectorAll('.option').forEach(function(opt) {
     opt.addEventListener('click', function() {
       var q = this.dataset.q;
@@ -253,7 +296,7 @@ class BaseChannel(ABC):
   <li><strong>Web UI implementations</strong> — some codebases have web dashboards, but none were analyzed in depth as primary interfaces.</li>
   <li><strong>Streaming protocols</strong> — how server-sent events, WebSockets, and chunked transfer encoding carry agent output to clients. Covered partially in <a href="0001-core-agent-loop.html">Lesson 0001</a> (streaming vs. batch).</li>
   <li><strong>IDE integration details</strong> — how Claude Code's structured IO mode, Codex's VS Code extension, and Opencode's editor plugins work internally.</li>
-  <li><strong>Mobile interfaces</strong> — none of the seven codebases ship a mobile app, though messaging channels (Telegram, WhatsApp) provide de facto mobile access.</li>
+  <li><strong>Mobile interfaces</strong> — none of the nine codebases ship a mobile app, though messaging channels (Telegram, WhatsApp, WeChat) provide de facto mobile access.</li>
 </ul>
 
 <h2>Primary sources</h2>
@@ -265,6 +308,8 @@ class BaseChannel(ABC):
   <li><strong>Opencode</strong>: <code>packages/tui/src/app.tsx</code> (36KB, OpenTUI + Solid.js), Web Worker server + RPC architecture</li>
   <li><strong>Nanobot</strong>: <code>cli/commands.py</code> (67KB, prompt_toolkit + rich), <code>api/server.py</code> (aiohttp OpenAI-compatible), 18 channel implementations</li>
   <li><strong>OpenClaw</strong>: <code>packages/gateway-protocol/</code>, <code>gateway-client/</code>, 24 channel adapters, <code>dist/channel-catalog.json</code></li>
+  <li><strong>DeepAgents</strong>: <code>dcode</code> CLI (interactive /model command, <code>~/.deepagents/config.toml</code>), <code>create_deep_agent()</code> returning CompiledStateGraph, LangGraph Server REST API, 8 stream modes</li>
+  <li><strong>DeerFlow</strong>: <code>app/channels/</code> (MessageBus + per-platform adapters), Next.js frontend (port 3000), FastAPI Gateway API (port 8001), nginx routing, SSE StreamBridge (worker.py line 317), DeerFlowClient embedded client</li>
 </ol>
 
 <h2>Recommended next reading</h2>
@@ -273,6 +318,7 @@ class BaseChannel(ABC):
   <li>If you want the <strong>cleanest multi-channel pattern</strong>: study <code>OpenClaw: packages/gateway-protocol/</code> — the protocol defines message formats, auth, and transport independent of any specific channel.</li>
   <li>If you want the <strong>most practical TUI pattern</strong>: read <code>Pi-mono: packages/tui/src/tui.ts</code> — 53KB of from-scratch terminal rendering shows exactly what a TUI needs and nothing more.</li>
   <li>If you want <strong>channel implementation depth</strong>: compare Nanobot's Feishu channel (78KB) with its Telegram channel (64KB) — two production-quality adapters with different authentication and event models.</li>
+  <li>If you want <strong>the most ambitious transport architecture</strong>: study <code>DeerFlow: app/channels/</code> — the MessageBus + per-platform adapter pattern with in-place card editing, plus the nginx-routed four-surface design (IM gateway, web UI, REST API, embedded client).</li>
 </ul>
 
 <div class="callout">

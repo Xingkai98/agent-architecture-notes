@@ -22,8 +22,8 @@
 </nav>
 
 <h1>Lesson 0004: Permission Model</h1>
-<p class="subtitle">From "trust the LLM completely" to "trust nothing" — how seven agent codebases decide what a tool can and cannot do.</p>
-<p class="meta">June 2026 · 7 primary source codebases · <a href="0004-permission-model.html">Permalink</a></p>
+<p class="subtitle">From "trust the LLM completely" to "trust nothing" — how nine agent codebases decide what a tool can and cannot do.</p>
+<p class="meta">June 2026 · 9 primary source codebases · <a href="0004-permission-model.html">Permalink</a></p>
 
 <p class="sidenote">Permission models in AI agents answer two questions: <strong>can the LLM ask for this tool?</strong> and <strong>can the harness safely execute it?</strong> These are different questions, and the codebases answer them at different points in the lifecycle. The difference between a hook, an ACL, and a sandbox is <em>when</em> the check happens and <em>who</em> enforces it.</p>
 
@@ -36,19 +36,20 @@
 <div class="spectrum">
   <span class="left">No permissions</span>
   <span class="bar"></span>
-  <span class="right">Full sandboxing</span>
+  <span class="right">Full OS sandboxing</span>
 </div>
 
 <ol>
   <li><strong>No permissions:</strong> nanobot, hermes-agent — tools run unconditionally. Any gating (check_fn, SSRF detection) is an availability or safety net, not a security boundary.</li>
   <li><strong>Hook-based delegation:</strong> pi-mono, openclaw — the framework provides a <code>beforeToolCall</code> hook; the caller implements whatever permission logic they want. The framework itself is neutral.</li>
-  <li><strong>ACL (Access Control List):</strong> claude-code, opencode — each tool has a permission level (allow, ask, deny). Rules are evaluated at registration time (what the LLM can see) and execution time (what actually runs).</li>
-  <li><strong>Full sandboxing:</strong> codex — the OS kernel enforces boundaries. Tools run inside Landlock, Windows sandbox, or macOS sandbox. The sandbox can escalate on retry.</li>
+  <li><strong>Traditional ACL (Access Control List):</strong> claude-code, opencode, DeepAgents — each tool or operation has a permission level (allow, ask, deny). Rules are evaluated at registration time (what the LLM can see) and execution time (what actually runs).</li>
+  <li><strong>Structural sandboxing:</strong> DeerFlow — hard boundaries defined by virtual path whitelists, size caps, and path traversal detection. Security comes from the runtime architecture, not from user-configured permission rules.</li>
+  <li><strong>Full OS sandboxing:</strong> codex — the OS kernel enforces boundaries. Tools run inside Landlock, Windows sandbox, or macOS sandbox. The sandbox can escalate on retry.</li>
 </ol>
 
 <h2>Claude Code — Permission hooks + ACL</h2>
 
-<p>Claude Code has the most fully-realized ACL system among the seven codebases. Permission checking is a first-class lifecycle method on every tool.</p>
+<p>Claude Code has the most fully-realized ACL system among the nine codebases. Permission checking is a first-class lifecycle method on every tool.</p>
 
 <h3>Per-tool permission check</h3>
 
@@ -139,6 +140,27 @@ buildTool({
 
 <p>Two tools are default-deny in sub-agents: <code>todowrite</code> and <code>task</code>. The <code>Wildcard.match</code> utility is used for deny-rule matching on tool names, supporting glob patterns so a single rule can cover families of tools (e.g., <code>mcp__*</code> to deny all MCP tools).</p>
 
+<h2>DeepAgents — Traditional ACL at the tool-operation level</h2>
+
+<p>DeepAgents (from LangChain) implements a permission model that operates at the individual tool-operation level — each filesystem read, write, edit, or shell command is checked independently against configured permission rules. Unlike Claude Code and opencode which check permissions at the tool-name level, DeepAgents checks permissions at the <em>operation-on-path</em> level.</p>
+
+<h3>FilesystemPermission: per-operation, per-path granularity</h3>
+
+<p>The core permission class is <code>FilesystemPermission</code>, defined at <code>middleware/filesystem.py:90-123</code>. Each permission entry specifies an <strong>operation type</strong> (read, write, edit, etc.), a <strong>path pattern</strong>, and a <strong>behavior</strong>: ALLOW, DENY, or ASK. These checks are embedded inside each tool implementation (e.g., lines 962, 1154, 1221, 1315) — meaning the permission check lives in the tool itself, not in a separate middleware layer. Permissions are passed via the <code>permissions</code> parameter to <code>create_deep_agent()</code>.</p>
+
+<pre><code># DeepAgents: middleware/filesystem.py:90-123 — per-operation permission model
+# FilesystemPermission(operation, path_pattern, behavior)
+#   operation: "read" | "write" | "edit" | ...
+#   path_pattern: glob or specific path
+#   behavior: ALLOW | DENY | ASK
+#
+# Checked inline inside each tool implementation (lines 962, 1154, 1221, 1315)
+# Passed via `permissions` parameter to create_deep_agent()</code></pre>
+
+<h3>Human-in-the-loop via LangGraph interrupts</h3>
+
+<p>DeepAgents supports human-in-the-loop approvals through LangGraph's interrupt/resume mechanism. The <code>interrupt_on</code> configuration specifies which conditions should pause execution and wait for human review — when a tool call matches an <code>interrupt_on</code> rule, the agent suspends and waits for explicit approval before proceeding. This is surfaced through the <code>HumanInTheLoopMiddleware</code> from <code>langchain.agents</code>, which provides configurable interrupt triggers. The permission model is traditional and explicit: <em>each operation on each path has a configured behavior</em>, making it the same allow/deny/ask paradigm as Claude Code and opencode, but enforced at finer granularity.</p>
+
 <h2>Pi-mono, OpenClaw — Hook-based delegation</h2>
 
 <p>Neither pi-mono nor openclaw ships with a built-in permission system. Instead, the framework exposes a <code>beforeToolCall</code> hook in <code>agent-loop.ts</code>. The caller — the application that embeds the agent framework — implements permission checking by providing a hook function.</p>
@@ -178,17 +200,80 @@ class ToolEntry:
 
 <p>These are classified as <strong>escalating hints</strong>, not permission denials. The LLM is nudged, not stopped — a fundamentally different philosophy from ACL-based or sandbox-based approaches.</p>
 
+<h2>DeerFlow — Structural security at the sandbox boundary</h2>
+
+<p>DeerFlow does not implement a permission model in the traditional ACL sense. Instead, it takes a <strong>structural security</strong> approach: define hard boundaries around what the agent can access, and enforce those boundaries at the sandbox level before any tool runs. It is not ACL and it is not OS-level sandboxing like Codex — it is something between them.</p>
+
+<h3>Sandbox boundaries: virtual paths, not permission rules</h3>
+
+<p>Instead of asking "is this operation permitted?", DeerFlow asks "is this path inside the sandbox?" The sandbox enforces a whitelist of virtual paths — only <code>/mnt/user-data/*</code>, <code>/mnt/skills/*</code>, <code>/mnt/acp-workspace/*</code>, and explicitly configured mounts are accessible. Path traversal attacks are detected and rejected by <code>_reject_path_traversal</code> in <code>sandbox/tools.py:626</code>.</p>
+
+<pre><code># DeerFlow: sandbox/tools.py — structural sandbox boundaries
+# _reject_path_traversal(path) — blocks "../", symlink escapes, etc.
+# Virtual path whitelist:
+#   /mnt/user-data/*
+#   /mnt/skills/*
+#   /mnt/acp-workspace/*
+#   + explicitly configured mounts
+# Host bash disabled by default when LocalSandboxProvider active
+# 80KB write_file size cap (configurable via DEERFLOW_WRITE_FILE_MAX_BYTES)
+# File operation locks for same-path serialization</code></pre>
+
+<h3>Hard resource caps and safety features</h3>
+
+<p>DeerFlow enforces several structural limits that serve as security barriers:</p>
+<ul>
+  <li><strong>Write file size cap:</strong> 80KB maximum per <code>write_file</code> call (configurable via <code>DEERFLOW_WRITE_FILE_MAX_BYTES</code>). Large writes are structurally impossible — no permission check to bypass.</li>
+  <li><strong>Host bash disabled:</strong> When <code>LocalSandboxProvider</code> is active, host bash execution is disabled by default (<code>is_host_bash_allowed</code>). The agent cannot escape the sandbox through shell access.</li>
+  <li><strong>File operation locks:</strong> Same-path file operations are serialized through locks, preventing race conditions where concurrent tool calls could interfere.</li>
+  <li><strong>Skill archive scanning:</strong> When loading skill archives, DeerFlow runs security checks: path traversal detection, symlink skipping, zip bomb size limits, and content scanning.</li>
+</ul>
+
+<h3>GuardrailMiddleware: pluggable pre-tool-call authorization</h3>
+
+<p>DeerFlow's <code>GuardrailMiddleware</code> provides a pluggable authorization layer that evaluates each tool call <em>before</em> execution. When a guardrail denies a tool call, the middleware returns an error <code>ToolMessage</code> instead of executing the tool. Three provider options exist:</p>
+<ul>
+  <li><strong>AllowlistProvider</strong> (built-in): a simple allowlist of permitted tool names.</li>
+  <li><strong>OAP policy providers</strong> (e.g., <code>aport-agent-guardrails</code>): external policy engines that evaluate tool calls against organizational rules.</li>
+  <li><strong>Custom providers</strong>: any implementation of the <code>GuardrailProvider</code> protocol.</li>
+</ul>
+
+<h3>SandboxAuditMiddleware: security logging</h3>
+
+<p>The <code>SandboxAuditMiddleware</code> audits every sandboxed shell and file operation for security logging before tool execution continues. This provides an audit trail of what the agent attempted, even for operations that were ultimately blocked — a capability that pure ACL systems typically lack.</p>
+
+<h2>DeepAgents vs. DeerFlow: two fundamentally different approaches to the same problem</h2>
+
+<p>These two codebases represent opposing ends of a design spectrum within the security space. DeepAgents has a <strong>traditional permission model</strong> (allow/deny/ask on operations), while DeerFlow has a <strong>structural security model</strong> (sandbox boundaries + virtual paths + size caps). They are two fundamentally different approaches to the same problem of constraining what an agent can do.</p>
+
+<table>
+  <tr><th>Dimension</th><th>DeepAgents (traditional ACL)</th><th>DeerFlow (structural security)</th></tr>
+  <tr><td><strong>Security paradigm</strong></td><td>Permission model — user-configured rules for each operation</td><td>Structural model — hard boundaries in the runtime architecture</td></tr>
+  <tr><td><strong>Enforcement level</strong></td><td>Tool-operation level (each read/write/edit checked individually)</td><td>Sandbox boundary level (path whitelist, traversal detection, size caps)</td></tr>
+  <tr><td><strong>Core question</strong></td><td>"Should this operation on this path be allowed?"</td><td>"Is this path inside the sandbox? Is this operation structurally possible?"</td></tr>
+  <tr><td><strong>Granularity</strong></td><td>Per-operation, per-path (ALLOW/DENY/ASK)</td><td>Per-sandbox (virtual path whitelist + size caps + host bash toggle)</td></tr>
+  <tr><td><strong>Human approval</strong></td><td>LangGraph interrupt/resume (HumanInTheLoopMiddleware)</td><td>GuardrailMiddleware (AllowlistProvider / OAP policies / custom)</td></tr>
+  <tr><td><strong>Audit</strong></td><td>Implicit via interrupt trail</td><td>Explicit via SandboxAuditMiddleware</td></tr>
+  <tr><td><strong>Bypass risk</strong></td><td>Permission misconfiguration (wrong path pattern or missing rule)</td><td>Sandbox escape (path traversal, host bash leak) — mitigated by _reject_path_traversal and host bash toggle</td></tr>
+  <tr><td><strong>When to choose</strong></td><td>When you need fine-grained, user-facing permission control (e.g., "allow reading docs/ but ask before writing src/")</td><td>When you need hard boundaries with minimal configuration (e.g., "the agent can only touch /mnt/user-data, period")</td></tr>
+</table>
+
+<div class="callout">
+  <strong>Key insight:</strong> DeepAgents asks the LLM's owner "may I do this?" before each operation — the permission lives in the <em>relationship between user and agent</em>. DeerFlow builds walls so certain operations are structurally impossible — the security lives in the <em>architecture of the runtime</em>. Neither is inherently better; they solve different threat models. An agent with shell access needs DeerFlow-style boundaries. An agent doing code review in a known repo benefits from DeepAgents-style granularity.
+</div>
+
 <h2>Comparative table</h2>
 
 <table>
-  <tr><th>Dimension</th><th>claude-code</th><th>codex</th><th>opencode</th><th>pi-mono</th><th>openclaw</th><th>hermes-agent</th><th>nanobot</th></tr>
-  <tr><td><strong>Approval model</strong></td><td>ACL (allow/ask/deny)</td><td>Sandbox + approval</td><td>ACL (Effect-TS)</td><td>Hook (consumer)</td><td>Hook (consumer)</td><td>None (check_fn)</td><td>None (SSRF hints)</td></tr>
-  <tr><td><strong>Sandboxing</strong></td><td>None</td><td>Landlock / Win / Mac + retry escalation</td><td>None</td><td>None</td><td>None</td><td>None</td><td>None</td></tr>
-  <tr><td><strong>Permission persistence</strong></td><td>Session / project / user</td><td>Per-session</td><td>Per-session (derived)</td><td>Consumer-defined</td><td>Consumer-defined</td><td>N/A</td><td>N/A</td></tr>
-  <tr><td><strong>Guardrails</strong></td><td>Deny rules, --dangerously-bypass-permissions</td><td>OS kernel enforcement</td><td>Default-deny for task/todowrite in subs</td><td>beforeToolCall hook</td><td>beforeToolCall hook</td><td>check_fn (availability)</td><td>SSRF + workspace boundary</td></tr>
-  <tr><td><strong>Check timing</strong></td><td>Registration + execution</td><td>Execution (pre-flight)</td><td>Materialization + execution</td><td>Execution (hook)</td><td>Execution (hook)</td><td>Registration (avail.)</td><td>Execution (inline)</td></tr>
-  <tr><td><strong>Fallback on deny</strong></td><td>User prompt</td><td>Escalate sandbox + retry</td><td>Error result to LLM</td><td>Error result to LLM</td><td>Error result to LLM</td><td>Tool silently excluded</td><td>Escalating hint to LLM</td></tr>
-  <tr><td><strong>Unique</strong></td><td>Three-scope persistence</td><td>Sandbox escalation on retry</td><td>Materialization-time filtering</td><td>Zero framework opinion</td><td>Hook + progress streaming</td><td>AST-based tool discovery</td><td>SSRF detection in runner</td></tr>
+  <tr><th>Dimension</th><th>claude-code</th><th>codex</th><th>opencode</th><th>deepagents</th><th>deerflow</th><th>pi-mono</th><th>openclaw</th><th>hermes-agent</th><th>nanobot</th></tr>
+  <tr><td><strong>Approval model</strong></td><td>ACL (allow/ask/deny)</td><td>OS sandbox + approval</td><td>ACL (Effect-TS)</td><td>ACL (per-op, per-path)</td><td>Structural (virtual paths, size caps)</td><td>Hook (consumer)</td><td>Hook (consumer)</td><td>None (check_fn)</td><td>None (SSRF hints)</td></tr>
+  <tr><td><strong>Sandboxing</strong></td><td>None</td><td>Landlock / Win / Mac + retry escalation</td><td>None</td><td>None</td><td>Virtual path whitelist, traversal detection, bash toggle</td><td>None</td><td>None</td><td>None</td><td>None</td></tr>
+  <tr><td><strong>Permission persistence</strong></td><td>Session / project / user</td><td>Per-session</td><td>Per-session (derived)</td><td>Per-agent (permissions param)</td><td>Per-sandbox config</td><td>Consumer-defined</td><td>Consumer-defined</td><td>N/A</td><td>N/A</td></tr>
+  <tr><td><strong>Guardrails/defenses</strong></td><td>Deny rules, --dangerously-bypass-permissions</td><td>OS kernel enforcement</td><td>Default-deny for task/todowrite in subs</td><td>FilesystemPermission, interrupt_on, HumanInTheLoopMiddleware</td><td>GuardrailMiddleware, _reject_path_traversal, 80KB write cap, archive scanning</td><td>beforeToolCall hook</td><td>beforeToolCall hook</td><td>check_fn (availability)</td><td>SSRF + workspace boundary</td></tr>
+  <tr><td><strong>Check timing</strong></td><td>Registration + execution</td><td>Execution (pre-flight)</td><td>Materialization + execution</td><td>Execution (inline in tool impl)</td><td>Execution (pre-flight middleware)</td><td>Execution (hook)</td><td>Execution (hook)</td><td>Registration (avail.)</td><td>Execution (inline)</td></tr>
+  <tr><td><strong>Fallback on deny</strong></td><td>User prompt</td><td>Escalate sandbox + retry</td><td>Error result to LLM</td><td>LangGraph interrupt (await human)</td><td>Error ToolMessage to LLM</td><td>Error result to LLM</td><td>Error result to LLM</td><td>Tool silently excluded</td><td>Escalating hint to LLM</td></tr>
+  <tr><td><strong>Audit trail</strong></td><td>No (permission decision only)</td><td>No (kernel enforcement)</td><td>No</td><td>Implicit (interrupt trail)</td><td>Explicit (SandboxAuditMiddleware)</td><td>No</td><td>No</td><td>No</td><td>No</td></tr>
+  <tr><td><strong>Unique</strong></td><td>Three-scope persistence</td><td>OS sandbox escalation on retry</td><td>Materialization-time filtering</td><td>Per-operation (not per-tool) ACL granularity</td><td>Structural walls, not permission rules</td><td>Zero framework opinion</td><td>Hook + progress streaming</td><td>AST-based tool discovery</td><td>SSRF detection in runner</td></tr>
 </table>
 
 <h2>The fundamental tradeoff: safety vs. complexity</h2>
@@ -199,8 +284,10 @@ class ToolEntry:
 
 <p><strong>Less safety infrastructure = simpler code, but the user (or the embedding application) shoulders all the risk.</strong> Pi-mono's hook-based approach has zero permission code in the framework. That is elegant — until an LLM runs <code>rm -rf /</code> because nobody wired up the hook.</p>
 
+<p>Between these extremes, <strong>DeepAgents and DeerFlow illuminate a deeper design choice</strong>: do you build your security as a set of user-configured rules (DeepAgents' per-operation ACL), or as hard architectural boundaries that cannot be configured away (DeerFlow's virtual path whitelist and size caps)? The answer depends on your deployment model — multi-tenant platforms gravitate toward structural boundaries, while single-user tools benefit from granular permission rules.</p>
+
 <div class="callout">
-  <strong>Design heuristic:</strong> Permission at <em>registration/materialization time</em> keeps the LLM from asking for things it cannot do. Permission at <em>execution time</em> keeps the harness safe from the LLM doing things it should not. The strongest systems (claude-code, opencode, codex) do both. The weakest (hermes-agent, nanobot) do neither — they gate on availability or nudge with hints, trusting the LLM to behave. Choose your point on the spectrum based on your threat model: if the LLM has access to a shell, execution-time enforcement is not optional.
+  <strong>Design heuristic:</strong> Permission at <em>registration/materialization time</em> keeps the LLM from asking for things it cannot do. Permission at <em>execution time</em> keeps the harness safe from the LLM doing things it should not. The strongest systems (claude-code, opencode, codex) do both. DeepAgents does execution-time only (inline in tool impl). DeerFlow does execution-time structural enforcement (path whitelist + traversal rejection + GuardrailMiddleware). The weakest (hermes-agent, nanobot) do neither — they gate on availability or nudge with hints, trusting the LLM to behave. Choose your point on the spectrum based on your threat model: if the LLM has access to a shell, execution-time enforcement is not optional.
 </div>
 
 <h2>Exercise: Identify the permission model</h2>
@@ -212,8 +299,8 @@ class ToolEntry:
   <div class="options">
     <div class="option" data-q="1" data-a="a">claude-code</div>
     <div class="option" data-q="1" data-a="b">codex</div>
-    <div class="option" data-q="1" data-a="c">opencode</div>
-    <div class="option" data-q="1" data-a="d">pi-mono</div>
+    <div class="option" data-q="1" data-a="c">DeerFlow</div>
+    <div class="option" data-q="1" data-a="d">DeepAgents</div>
   </div>
   <div class="feedback" id="feedback1"></div>
 
@@ -234,11 +321,29 @@ class ToolEntry:
     <div class="option" data-q="3" data-a="d">Validating tool input schemas</div>
   </div>
   <div class="feedback" id="feedback3"></div>
+
+  <div class="question">Q4. What fundamentally distinguishes DeepAgents' permission model from DeerFlow's security model?</div>
+  <div class="options">
+    <div class="option" data-q="4" data-a="a">DeepAgents uses LangGraph, DeerFlow does not</div>
+    <div class="option" data-q="4" data-a="b">DeepAgents has traditional per-operation ACL (allow/deny/ask), while DeerFlow has structural sandbox boundaries (virtual paths, size caps)</div>
+    <div class="option" data-q="4" data-a="c">DeepAgents is written in Python, DeerFlow is not</div>
+    <div class="option" data-q="4" data-a="d">DeerFlow only runs in Docker containers</div>
+  </div>
+  <div class="feedback" id="feedback4"></div>
+
+  <div class="question">Q5. In DeerFlow, what mechanism evaluates tool calls before execution and can return an error ToolMessage on deny?</div>
+  <div class="options">
+    <div class="option" data-q="5" data-a="a">SandboxAuditMiddleware</div>
+    <div class="option" data-q="5" data-a="b">_reject_path_traversal</div>
+    <div class="option" data-q="5" data-a="c">GuardrailMiddleware</div>
+    <div class="option" data-q="5" data-a="d">LocalSandboxProvider</div>
+  </div>
+  <div class="feedback" id="feedback5"></div>
 </div>
 
 <script>
 (function() {
-  var answers = { 1: 'b', 2: 'b', 3: 'b' };
+  var answers = { 1: 'b', 2: 'b', 3: 'b', 4: 'b', 5: 'c' };
   document.querySelectorAll('.option').forEach(function(opt) {
     opt.addEventListener('click', function() {
       var q = this.dataset.q;
@@ -265,6 +370,8 @@ class ToolEntry:
   <li><strong>MCP tool permission inheritance</strong> — how external tools from MCP servers inherit the session's permission context (<a href="0004-permission-model.html">covered here</a> for claude-code's assembleToolPool)</li>
   <li><strong>Permission UI / user prompting</strong> — the TUI/CLI prompts that ask users "allow this tool?" — covered in <a href="0007-ui-transport.html">Lesson 0007</a></li>
   <li><strong>Tool execution sandboxing internals</strong> — the Landlock rule construction and platform-specific sandbox APIs — covered in <a href="0002-tool-system.html">Lesson 0002</a></li>
+  <li><strong>LangGraph interrupt/resume lifecycle</strong> — how DeepAgents' HumanInTheLoopMiddleware integrates with LangGraph's state machine to pause and resume agent execution — covered in a future lesson on agent orchestration frameworks</li>
+  <li><strong>DeerFlow's full sandbox provider architecture</strong> — the LocalSandboxProvider, container-based isolation, and skill archive security scanning pipeline — covered in a future lesson on deployment and isolation</li>
 </ul>
 
 <h2>Primary sources</h2>
@@ -272,6 +379,8 @@ class ToolEntry:
   <li><strong>claude-code</strong>: <code>src/Tool.ts</code> (checkPermissions, buildTool defaults), <code>src/tools.ts:271</code> (getTools), <code>:263</code> (filterToolsByDenyRules), <code>:345</code> (assembleToolPool)</li>
   <li><strong>codex</strong>: <code>codex-rs/core/src/tools/orchestrator.rs</code> (ToolOrchestrator pipeline), <code>codex-rs/core/src/tools/parallel.rs</code> (ToolCallRuntime)</li>
   <li><strong>opencode</strong>: <code>packages/opencode/src/agent/subagent-permissions.ts</code> (deriveSubagentSessionPermission), <code>packages/core/src/tool/tool.ts</code> (withPermission), <code>packages/core/src/tool/registry.ts</code> (materialization-time filtering)</li>
+  <li><strong>deepagents</strong>: <code>middleware/filesystem.py:90-123</code> (FilesystemPermission class — per-operation/per-path ALLOW/DENY/ASK), inline checks at lines 962, 1154, 1221, 1315, <code>HumanInTheLoopMiddleware</code> (LangGraph interrupt/resume integration)</li>
+  <li><strong>deerflow</strong>: <code>sandbox/tools.py:626</code> (_reject_path_traversal), virtual path whitelist enforcement, <code>GuardrailMiddleware</code> (pluggable GuardrailProvider protocol), <code>SandboxAuditMiddleware</code>, 80KB write cap (<code>DEERFLOW_WRITE_FILE_MAX_BYTES</code>), host bash toggle (<code>is_host_bash_allowed</code>)</li>
   <li><strong>pi-mono</strong>: <code>packages/agent/src/agent-loop.ts</code> (beforeToolCall hook)</li>
   <li><strong>openclaw</strong>: <code>packages/agent-core/src/agent-loop.ts</code> (beforeToolCall hook, identical pattern)</li>
   <li><strong>hermes-agent</strong>: <code>tools/registry.py:77</code> (ToolEntry.check_fn, max_result_size_chars)</li>
@@ -282,7 +391,9 @@ class ToolEntry:
 <ul>
   <li>If you want the <strong>most sophisticated</strong> permission system: trace <code>codex/codex-rs/core/src/tools/orchestrator.rs</code> — the approval → sandbox → execute → retry pipeline is the most complete safety architecture in any open-source agent.</li>
   <li>If you want the <strong>most practical</strong> ACL pattern: read <code>claude-code/src/tools.ts</code> — the three-filter pipeline (context → deny rules → merge) is clean and directly applicable to new agent frameworks.</li>
+  <li>If you want the <strong>most granular</strong> ACL: study <code>deepagents/middleware/filesystem.py</code> — per-operation, per-path permission checking with inline enforcement at each tool call site.</li>
   <li>If you want the <strong>most elegant</strong> type-level approach: study <code>opencode/packages/core/src/tool/registry.ts</code> — materialization-time filtering means the type system prevents the LLM from ever seeing denied tools.</li>
+  <li>If you want to understand <strong>structural sandboxing</strong> as an alternative to ACLs: trace <code>deerflow/sandbox/tools.py</code> — the virtual path whitelist, traversal rejection, and size caps together form a security model with no user-configurable permission rules.</li>
 </ul>
 
 <div class="callout">

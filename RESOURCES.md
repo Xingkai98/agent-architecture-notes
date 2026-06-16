@@ -1,6 +1,8 @@
 # Agent Architecture Resources
 
-## Knowledge — Primary Codebases
+## Course 1: Production Agent Harnesses (9 codebases)
+
+Comparative analysis of production-grade single-agent harnesses — the execution loop, tool system, context management, permissions, memory, sub-agents, UI/transport, and error recovery. Local clones at `reference/frameworks/`.
 
 ### Coding Agents
 
@@ -26,6 +28,45 @@
 
 - [GitHub: HKUDS/nanobot](https://github.com/HKUDS/nanobot)
   Ultra-lightweight personal AI agent. Python, ~3.5k LOC. WebUI, multi-channel (Telegram/Slack/Discord/Feishu/Matrix/Email/WeChat/DingTalk), MCP integration, persistent memory. Use for: studying a minimal general-agent codebase where the entire system can be read in one session.
+
+- [GitHub: langchain-ai/deepagents](https://github.com/langchain-ai/deepagents)
+  Opinionated agent harness built on LangGraph/LangChain, directly inspired by Claude Code. Python. Middleware stack architecture: planning (TodoList), filesystem, sub-agents (sync + async), summarization (~85% window trigger), memory (AGENTS.md injection), skills. MIT. Use for: studying a "framework-first" harness where every architectural concern is an explicit, pluggable middleware — contrast with the implicit coupling in product agents.
+
+- [GitHub: bytedance/deer-flow](https://github.com/bytedance/deer-flow)
+  ByteDance's "SuperAgent" harness. Python. Built on LangGraph. ~57k stars. 11+ middleware chain, skill system with slash-command activation and per-skill tool whitelists, SandboxProvider abstraction (Local/Docker/AioSandbox) with virtual path translation, dual-thread-pool subagent executor (max 3 concurrent), FileMemoryStorage with LLM-driven fact extraction and confidence-based pruning. MIT. Use for: studying sandbox abstraction as a first-class architectural dimension and skill lifecycle management.
+
+## Course 2: Agent Infrastructure — LangChain & LangGraph Ecosystem
+
+The runtime substrate that most modern agents run on. Not agents themselves, but the execution model, state management, and middleware protocol that agents are built from.
+
+### Primary
+
+- [GitHub: langchain-ai/langgraph](https://github.com/langchain-ai/langgraph)
+  Graph-based agent runtime implementing Pregel/BSP (Bulk Synchronous Parallel) execution. Python + JS. Key architectural primitives: StateGraph (define + compile), PregelLoop (Plan → Execute → Update), checkpoint system (cross-session state persistence), interrupt/resume (human-in-the-loop), streaming (8 stream modes), ToolNode. DeepAgents, DeerFlow, and LangChain's create_agent all compile down to this runtime. Use for: understanding the execution model beneath every LangGraph-based agent — the "agent OS."
+
+- [GitHub: langchain-ai/langchain](https://github.com/langchain-ai/langchain)
+  LLM application framework. Python + JS. Contains two generations of agent system: (1) Classic AgentExecutor — deprecated while-loop with callback-based instrumentation, max 15 iterations; (2) V1 create_agent — graph-based via LangGraph, 6-hook AgentMiddleware protocol (before_agent, before_model, after_model, after_agent, wrap_model_call, wrap_tool_call), structured output support. Use for: studying the architectural evolution from callback-driven while-loop to middleware-driven graph execution.
+
+### Related
+
+- [LangChain Docs: Middleware](https://docs.langchain.com/oss/python/langchain/agents) — Official middleware protocol documentation.
+- [LangGraph Docs: Low-level API](https://langchain-ai.github.io/langgraph/concepts/low_level/) — Pregel execution model, channels, checkpointing.
+
+## Course 3: Multi-Agent Orchestration (Materials Only)
+
+Coordination frameworks for multiple agents — communication protocols, task delegation, speaker selection. Distinct from single-agent harness architecture. No course content yet; materials gathered for future track.
+
+- [GitHub: crewAIInc/crewAI](https://github.com/crewAIInc/crewAI)
+  Role-based multi-agent orchestration. Python. ~51k stars. Crew → Task → Agent model with sequential and hierarchical processes. Each agent has an internal ReAct loop. Architectural highlights: unified Memory with LLM-driven RecallFlow (deep/shallow retrieval, composite scoring), agent-to-agent delegation via AgentTools, concurrent task execution. Use for: studying role-based orchestration and LLM-augmented memory retrieval.
+
+- [GitHub: microsoft/autogen](https://github.com/microsoft/autogen)
+  Multi-agent conversation framework. Python. ~57k stars. **Maintenance mode** — Microsoft has moved to Microsoft Agent Framework (MAF). Architectural highlights: event-driven actor model (SingleThreadedAgentRuntime with asyncio.Queue), publish-subscribe + direct RPC messaging, GroupChat with pluggable speaker selection (RoundRobin, LLM Selector, Swarm), AssistantAgent with internal tool-calling loop. Use for: studying event-driven actor architecture for agent communication and the maintenance-mode lifecycle of a major framework. Can be taught together with MAF as an "evolution story" — AutoGen's conversational multi-agent patterns merged with Semantic Kernel's enterprise foundation into MAF.
+
+- [GitHub: microsoft/agent-framework](https://github.com/microsoft/agent-framework)
+  Microsoft Agent Framework (MAF) — the successor to both AutoGen and Semantic Kernel. Python + .NET. Open-source. Production-grade agent framework with: graph/DAG-based deterministic workflows alongside conversational group chats, full .NET + Python API parity, native MCP + A2A + OpenAPI support, Azure AI Foundry integration, OpenTelemetry tracing, enterprise middleware (filtering, logging, authorization). Architecture: multi-provider (OpenAI, Azure, Anthropic, Gemini, Ollama, Bedrock, Mistral, Claude via chatkit), multi-orchestration (declarative agents, group chat, graph workflows), stateful checkpoints. Local clone at `reference/frameworks/ms-agent-framework/`. Use for: studying how a major platform vendor (Microsoft) designs an agent framework for production — the convergence point of conversational and workflow paradigms.
+
+- [GitHub: agentscope-ai/agentscope](https://github.com/agentscope-ai/agentscope)
+  Alibaba's agent platform. Python. ~23k stars. Hybrid: single Agent class with ReAct loop + Team tools (AgentCreate, TeamSay) + MessageBus for multi-agent. Architectural highlights: Workspace abstraction (Local/Docker/E2B) with lifecycle management, Toolkit/ToolGroup system with dynamic activation/deactivation, ContextConfig-driven memory compression with structured summaries, MCP gateway running inside sandbox containers. Use for: studying the boundary between single-agent harness and multi-agent platform — AgentScope tries to be both.
 
 ## Knowledge — Papers
 

@@ -4,7 +4,7 @@
 <script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Lesson 0008: Error Recovery — resilience patterns across AI agent codebases</title>
+<title>Lesson 0008: Error Recovery — resilience patterns across 9 AI agent codebases</title>
 <link rel="stylesheet" href="../assets/style.css">
 <style>
   .spectrum { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0; padding: 0.8rem; background: #fafaf3; border: 1px solid var(--rule); font-size: 0.82rem; }
@@ -22,12 +22,12 @@
 </nav>
 
 <h1>Lesson 0008: Error Recovery</h1>
-<p class="subtitle">From crash to continuation — how 7 agent codebases classify, recover from, and survive failure.</p>
-<p class="meta">June 2026 · 7 primary source codebases · <a href="0008-error-recovery.html">Permalink</a></p>
+<p class="subtitle">From crash to continuation — how 9 agent codebases classify, recover from, and survive failure.</p>
+<p class="meta">June 2026 · 9 primary source codebases · <a href="0008-error-recovery.html">Permalink</a></p>
 
-<p class="sidenote">Every agent loop will encounter errors. The difference between a brittle agent and a resilient one is <strong>not</strong> whether errors occur — it's whether the agent can see the error, classify it, choose a recovery strategy, and continue without losing state. This lesson traces the full recovery pipeline across all 7 codebases.</p>
+<p class="sidenote">Every agent loop will encounter errors. The difference between a brittle agent and a resilient one is <strong>not</strong> whether errors occur — it's whether the agent can see the error, classify it, choose a recovery strategy, and continue without losing state. This lesson traces the full recovery pipeline across all 9 codebases.</p>
 
-<p>In <a href="0002-tool-system.html">Lesson 0002</a>, we saw tools as the engine of the agent loop. In <a href="0003-context-management.html">Lesson 0003</a>, we saw how context is the loop's memory. This lesson covers what happens when the loop <em>breaks</em> — and how each codebase picks it back up.</p>
+<p>In <a href="0002-tool-system.html">Lesson 0002</a>, we saw tools as the engine of the agent loop. In <a href="0003-context-management.html">Lesson 0003</a>, we saw how context is the loop's memory. This lesson covers what happens when the loop <em>breaks</em> — and how each of the 9 codebases picks it back up.</p>
 
 <h2>Error categories</h2>
 
@@ -45,17 +45,18 @@
 
 <h2>Two poles of recovery philosophy</h2>
 
-<p>Across the seven codebases, two poles emerge:</p>
+<p>Across the nine codebases, two poles emerge — but with a new axis visible only in the two newest entries:</p>
 
 <div class="spectrum">
   <span class="left">Caller-delegated (pi-mono, openclaw)</span>
   <span class="bar"></span>
-  <span class="right">Full self-recovery (claude-code, hermes-agent)</span>
+  <span class="right">Full self-recovery (claude-code, hermes-agent, nanobot)</span>
 </div>
 
 <ol>
   <li><strong>Caller-delegated:</strong> pi-mono, openclaw. The agent loop stops on error and signals the reason upward. Recovery — retry, restart, model switching — is the caller's responsibility. The framework provides hooks (<code>config.transformContext</code>, <code>config.prepareNextTurn</code>) but no built-in retry logic.</li>
   <li><strong>Full self-recovery:</strong> claude-code, hermes-agent, nanobot. The agent loop includes retry with exponential backoff, model fallback chains, context compaction on overflow, and checkpoint restore. The loop itself is a state machine with error transitions.</li>
+  <li><strong>Middleware-as-boundaries:</strong> DeepAgents, DeerFlow. Rather than embedding recovery logic inside the agent loop, these frameworks make error recovery a <strong>first-class middleware concern</strong>. Each error type gets its own middleware. Each <code>wrap_model_call()</code> and <code>wrap_tool_call()</code> acts as an error boundary — failures in one layer can be caught and handled by outer layers. DeerFlow's 19-middleware chain means 19 independent error boundaries: unprecedented granularity.</li>
   <li><strong>Hybrid:</strong> codex, opencode. Some errors are handled internally (SQLite recovery, step limits), others are surfaced to the caller.</li>
 </ol>
 
@@ -177,6 +178,74 @@ jitter_ratio = 0.5     # ±50% randomization
 
 <p>Hermes-agent maintains an ordered fallback chain on the agent instance: <code>agent._fallback_chain</code> — a list of <code>(provider, model)</code> pairs. When the classifier returns a hard failure reason (model_not_found, billing, content_filter), or when all one-shot guards for a soft failure are exhausted, the agent activates the next entry in the chain and resets <code>retry_count</code> to 0. This means the full recovery budget resets on each fallback step — a fresh model gets a fresh chance.</p>
 
+<h2>DeepAgents: Middleware as error boundaries</h2>
+
+<p>DeepAgents takes a fundamentally architectural approach to error recovery: every piece of recovery logic is a <strong>middleware</strong>. Rather than inlining error handling in the agent loop, DeepAgents wraps model calls and tool calls in a middleware stack where each layer catches and handles a specific error class.</p>
+
+<h3>PatchToolCallsMiddleware: Streaming tool-call repair</h3>
+
+<p><code>middleware/patch_tool_calls.py:11</code> solves a streaming-specific problem: when a stream is cut off mid-tool-call, partial tool calls can crash the agent. PatchToolCallsMiddleware detects incomplete tool call payloads in the streamed response and either completes or removes them before they reach the execution layer. This prevents a whole class of "malformed response" crashes that most codebases handle with a simple retry.</p>
+
+<h3>SummarizationMiddleware: Emergency context compaction</h3>
+
+<p>When the LLM provider throws a <code>ContextOverflowError</code>, the SummarizationMiddleware triggers <strong>emergency summarization</strong> — compressing the conversation history to fit within the token budget — keeping the agent alive rather than crashing. Unlike Claude Code's multi-stage drain-and-collapse pipeline, this is a single-stage emergency intervention at the middleware layer.</p>
+
+<h3>ModelRetryMiddleware and ModelFallbackMiddleware</h3>
+
+<p>DeepAgents integrates two middleware from <code>langchain.agents</code>:</p>
+<ul>
+  <li><strong>ModelRetryMiddleware</strong> — retries on transient provider errors (rate limits, server errors, timeouts) within a single middleware, isolating retry logic from the rest of the stack.</li>
+  <li><strong>ModelFallbackMiddleware</strong> — when retries are exhausted, switches to a fallback model. The fallback decision is a middleware concern, not a loop concern.</li>
+</ul>
+
+<h3>AnthropicPromptCachingMiddleware</h3>
+
+<p>Always included in the middleware stack, this middleware handles prompt caching failures gracefully. If the Anthropic API rejects a cached prompt prefix (e.g., due to cache eviction), this middleware falls back to an uncached request rather than surfacing an error to the agent loop.</p>
+
+<h3>The architectural insight: middleware IS error recovery</h3>
+
+<p>In DeepAgents, every <code>wrap_model_call()</code> and <code>wrap_tool_call()</code> in the middleware stack acts as an <strong>error boundary</strong>. When a middleware layer fails, outer layers can catch and handle the failure. This is radically different from the inline-recovery approach of Claude Code, hermes-agent, and nanobot. Rather than one big loop with embedded recovery logic, DeepAgents composes recovery from independent, testable middleware pieces — each one responsible for exactly one error type.</p>
+
+<div class="callout">
+  <strong>Design observation:</strong> DeepAgents proves that error recovery can be <strong>composed</strong> rather than <strong>embedded</strong>. The middleware stack is declarative: you can see every recovery strategy by reading the middleware list. Adding a new recovery strategy means adding a middleware — no existing code changes.
+</div>
+
+<h2>DeerFlow: The 19-middleware error boundary chain</h2>
+
+<p>DeerFlow takes the middleware approach to its logical extreme: a <strong>19-middleware chain</strong> where each middleware handles one error concern. With 19 independent error boundaries, DeerFlow achieves granularity unmatched by any other codebase.</p>
+
+<h3>LLMErrorHandlingMiddleware: Provider failure normalization</h3>
+
+<p>This middleware intercepts all provider/model invocation failures and normalizes them into recoverable, assistant-facing errors. Rather than letting a raw provider exception propagate through the stack, LLMErrorHandlingMiddleware converts it into a structured error that downstream middleware and tools can reason about.</p>
+
+<h3>ToolErrorHandlingMiddleware: Tool exceptions as messages</h3>
+
+<p>Converts tool execution exceptions into error <code>ToolMessages</code> so the run can continue instead of aborting. When a tool throws, the agent sees a structured error message rather than a crash — the model can decide whether to retry, work around, or report the failure.</p>
+
+<h3>DanglingToolCallMiddleware: Orphaned tool call recovery</h3>
+
+<p>When an <code>AIMessage</code> contains <code>tool_calls</code> that lack corresponding <code>ToolMessage</code> responses (e.g., due to user interruption mid-turn), this middleware injects placeholder <code>ToolMessages</code> — including the raw provider tool-call payloads — so the conversation remains structurally valid. Without this, dangling tool calls would cause the next model invocation to fail with a schema error.</p>
+
+<h3>LoopDetectionMiddleware: The unique one</h3>
+
+<p>DeerFlow is the <strong>only</strong> codebase with explicit loop detection as an architectural component. <code>LoopDetectionMiddleware</code> detects when the model is stuck in a repeated tool-call cycle. When a loop is detected, it performs a <strong>hard stop</strong>: clearing both structured <code>tool_calls</code> and raw provider tool-call metadata from the response, then forcing the model to produce a final text answer. This prevents the most frustrating agent failure mode — the infinite tool-call loop where the model keeps calling the same tool with the same arguments.</p>
+
+<h3>SandboxAuditMiddleware: Pre-execution safety net</h3>
+
+<p>Security logging before every tool execution. While primarily a security feature, it acts as a pre-execution safety net — tools that would be dangerous are blocked before they run, preventing recovery from even being necessary.</p>
+
+<h3>SubAgentExecutor timeout</h3>
+
+<p>Sub-agents get a <strong>900-second default timeout</strong>. If a sub-agent exceeds its budget, a <code>task_timed_out</code> event is emitted, and the parent agent can decide whether to retry, fall back, or report. This is delegated timeout handling — the parent remains in control.</p>
+
+<h3>Worker-level recovery: checkpoint and rollback</h3>
+
+<p><code>worker.py:164-199</code> implements <strong>pre-run checkpoint snapshots</strong>. Before each run, the worker captures its state. If the run fails, the worker can restore to the pre-run checkpoint — effectively undoing all state mutations from the failed attempt. This is a whole-worker rollback, not just context or tool-level recovery.</p>
+
+<div class="callout">
+  <strong>Design observation:</strong> DeerFlow's 19-middleware chain means 19 independent error boundaries — unprecedented granularity across all 9 codebases. Each middleware is a single-responsibility error handler. The result is a recovery architecture where you can add, remove, or reorder recovery strategies without touching the agent loop. The LoopDetectionMiddleware in particular is unique: no other codebase bakes loop detection into its architecture as a first-class component.
+</div>
+
 <h2>Codex: SQLite corruption recovery</h2>
 
 <p>Codex stands apart with a recovery mechanism unique to its architecture: the agent's runtime state is stored in a SQLite database, and SQLite corruption is a real failure mode in long-running agent sessions.</p>
@@ -285,20 +354,20 @@ type RunError =
 <h2>Comparative table</h2>
 
 <table>
-  <tr><th>Dimension</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th></tr>
-  <tr><td><strong>API retry</strong></td><td>None</td><td>None</td><td>Exponential + fallback model</td><td>Jittered exp (5-120s)</td><td>3 attempts or unlimited</td><td>None (delegated)</td><td>Effect retry</td></tr>
-  <tr><td><strong>Context overflow</strong></td><td>transformContext hook</td><td>transformContext hook</td><td>Drain + collapse + retry (multi-stage)</td><td>Truncation + image drop (6 guards)</td><td>None explicit</td><td>None</td><td>Single-shot compact + retry</td></tr>
-  <tr><td><strong>Model fallback</strong></td><td>None (caller)</td><td>None (caller)</td><td>FallbackTriggeredError → fallbackModel</td><td>Ordered fallback chain (reset count)</td><td>None explicit</td><td>None</td><td>None</td></tr>
-  <tr><td><strong>Tool error recovery</strong></td><td>Error as result</td><td>Error as result</td><td>Error as result + truncation</td><td>Error as result</td><td>Error as result + checkpoint restore</td><td>Sandbox escalate retry</td><td>failUnsettledTools()</td></tr>
-  <tr><td><strong>Error classification</strong></td><td>None</td><td>None</td><td>12 terminal reasons (inline)</td><td>22 FailoverReasons (pipeline)</td><td>finish_reason check</td><td>SQLite error codes</td><td>5-type union</td></tr>
-  <tr><td><strong>Max-tokens recovery</strong></td><td>None</td><td>None</td><td>2-phase: escalate + inject (3x)</td><td>None explicit</td><td>Length recovery msg (3x)</td><td>None</td><td>None</td></tr>
-  <tr><td><strong>State preservation</strong></td><td>None</td><td>None</td><td>Mutable State object</td><td>TurnRetryState (14 flags)</td><td>Checkpoint to disk</td><td>Backup corrupt DB</td><td>Context snapshots</td></tr>
-  <tr><td><strong>Unique</strong></td><td>Caller-owned hooks</td><td>Progress-aware abort</td><td>Flat loop: all exits visible in one function</td><td>One-shot guard matrix</td><td>Stream stall resume</td><td>SQLite forensic backup</td><td>Effect-TS typed union</td></tr>
+  <tr><th>Dimension</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>DeepAgents</th><th>DeerFlow</th><th>nanobot</th><th>codex</th><th>opencode</th></tr>
+  <tr><td><strong>API retry</strong></td><td>None</td><td>None</td><td>Exponential + fallback model</td><td>Jittered exp (5-120s)</td><td>ModelRetryMiddleware</td><td>LLMErrorHandlingMiddleware</td><td>3 attempts or unlimited</td><td>None (delegated)</td><td>Effect retry</td></tr>
+  <tr><td><strong>Context overflow</strong></td><td>transformContext hook</td><td>transformContext hook</td><td>Drain + collapse + retry (multi-stage)</td><td>Truncation + image drop (6 guards)</td><td>SummarizationMiddleware emergency fallback</td><td>LLMErrorHandling normalization</td><td>None explicit</td><td>None</td><td>Single-shot compact + retry</td></tr>
+  <tr><td><strong>Model fallback</strong></td><td>None (caller)</td><td>None (caller)</td><td>FallbackTriggeredError → fallbackModel</td><td>Ordered fallback chain (reset count)</td><td>ModelFallbackMiddleware</td><td>Within LLMErrorHandling</td><td>None explicit</td><td>None</td><td>None</td></tr>
+  <tr><td><strong>Tool error recovery</strong></td><td>Error as result</td><td>Error as result</td><td>Error as result + truncation</td><td>Error as result</td><td>PatchToolCallsMiddleware + error boundaries</td><td>ToolErrorHandling + DanglingToolCall middleware</td><td>Error as result + checkpoint restore</td><td>Sandbox escalate retry</td><td>failUnsettledTools()</td></tr>
+  <tr><td><strong>Error classification</strong></td><td>None</td><td>None</td><td>12 terminal reasons (inline)</td><td>22 FailoverReasons (pipeline)</td><td>1 middleware per error type</td><td>1 middleware per error type (19 total)</td><td>finish_reason check</td><td>SQLite error codes</td><td>5-type union</td></tr>
+  <tr><td><strong>Max-tokens recovery</strong></td><td>None</td><td>None</td><td>2-phase: escalate + inject (3x)</td><td>None explicit</td><td>SummarizationMiddleware</td><td>LoopDetectionMiddleware (hard-stop)</td><td>Length recovery msg (3x)</td><td>None</td><td>None</td></tr>
+  <tr><td><strong>State preservation</strong></td><td>None</td><td>None</td><td>Mutable State object</td><td>TurnRetryState (14 flags)</td><td>Middleware chain wraps calls</td><td>Worker checkpoint snapshot</td><td>Checkpoint to disk</td><td>Backup corrupt DB</td><td>Context snapshots</td></tr>
+  <tr><td><strong>Unique</strong></td><td>Caller-owned hooks</td><td>Progress-aware abort</td><td>Flat loop: all exits visible in one function</td><td>One-shot guard matrix</td><td>Middleware-as-boundaries composition</td><td>LoopDetectionMiddleware (only codebase with explicit loop detection)</td><td>Stream stall resume</td><td>SQLite forensic backup</td><td>Effect-TS typed union</td></tr>
 </table>
 
 <h2>Design heuristics</h2>
 
-<p>Four principles emerge from studying all 7 codebases:</p>
+<p>Five principles emerge from studying all 9 codebases:</p>
 
 <div class="callout">
   <strong>1. Recovery paths should be VISIBLE.</strong> Flatten the loop to see all terminal conditions in one function. Claude Code's <code>queryLoop()</code> is the exemplar — 12 terminal reasons and 7 recovery transitions, all in one file, all with line numbers. When recovery logic is scattered across files (retry in one, compaction in another, fallback in a third), it becomes impossible to reason about the complete state machine.
@@ -314,6 +383,10 @@ type RunError =
 
 <div class="callout">
   <strong>4. The more complex the recovery, the flatter the loop should be.</strong> Claude Code has the most recovery paths (7) and the flattest loop (all in <code>queryLoop()</code>). This is not coincidence. When recovery logic is deeply nested or spread across modules, adding a new recovery path risks breaking existing ones. A flat, visible loop makes every transition explicit and every interaction observable.
+</div>
+
+<div class="callout">
+  <strong>5. Error recovery as composed middleware beats embedded recovery when the error space is large.</strong> DeepAgents and DeerFlow demonstrate that when you have many error types (streaming cutoffs, tool failures, overloaded context, loop detection, caching failures, model fallback), composing recovery from independent middleware pieces is more maintainable than embedding it all in one loop. Each middleware is a single-responsibility error handler — testable in isolation, composable in sequence. DeerFlow's 19-middleware chain proves this scales to two-digit error concerns without collapsing under its own weight. However, middleware composition loses the visibility benefit of a flat loop — you can't see all recovery transitions in one function.
 </div>
 
 <h2>Exercise: Which recovery strategy?</h2>
@@ -356,11 +429,38 @@ type RunError =
     <div class="option" data-q="4" data-a="d">They use SQLite for error logging</div>
   </div>
   <div class="feedback" id="feedback4"></div>
+
+  <div class="question">Q5. Which codebase has the most granular error boundary architecture, with 19 independent middleware error handlers?</div>
+  <div class="options">
+    <div class="option" data-q="5" data-a="a">DeepAgents</div>
+    <div class="option" data-q="5" data-a="b">claude-code</div>
+    <div class="option" data-q="5" data-a="c">hermes-agent</div>
+    <div class="option" data-q="5" data-a="d">DeerFlow</div>
+  </div>
+  <div class="feedback" id="feedback5"></div>
+
+  <div class="question">Q6. What unique architectural component does DeerFlow include that no other codebase bakes into its architecture as a first-class concern?</div>
+  <div class="options">
+    <div class="option" data-q="6" data-a="a">Model fallback chain</div>
+    <div class="option" data-q="6" data-a="b">LoopDetectionMiddleware</div>
+    <div class="option" data-q="6" data-a="c">Stream stall recovery</div>
+    <div class="option" data-q="6" data-a="d">SQLite corruption recovery</div>
+  </div>
+  <div class="feedback" id="feedback6"></div>
+
+  <div class="question">Q7. What streaming-specific edge case does DeepAgents' PatchToolCallsMiddleware handle?</div>
+  <div class="options">
+    <div class="option" data-q="7" data-a="a">Timeout during tool execution</div>
+    <div class="option" data-q="7" data-a="b">Interrupted tool calls from cut-off streaming (partial tool call payloads)</div>
+    <div class="option" data-q="7" data-a="c">Tool results that exceed token limits</div>
+    <div class="option" data-q="7" data-a="d">Concurrent tool call race conditions</div>
+  </div>
+  <div class="feedback" id="feedback7"></div>
 </div>
 
 <script>
 (function() {
-  var answers = { 1: 'c', 2: 'c', 3: 'b', 4: 'b' };
+  var answers = { 1: 'c', 2: 'c', 3: 'b', 4: 'b', 5: 'd', 6: 'b', 7: 'b' };
   document.querySelectorAll('.option').forEach(function(opt) {
     opt.addEventListener('click', function() {
       var q = this.dataset.q;
@@ -393,6 +493,8 @@ type RunError =
 <ol>
   <li><strong>claude-code</strong>: <code>src/query.ts:241</code> (queryLoop), <code>:646</code> (blocking_limit), <code>:977</code> (image_error), <code>:996</code> (model_error), <code>:1051</code> (aborted_streaming), <code>:1175</code> (prompt_too_long), <code>:1264,1357</code> (completed), <code>:1279</code> (stop_hook_prevented), <code>:1515</code> (aborted_tools), <code>:1520</code> (hook_stopped), <code>:1711</code> (max_turns); <code>src/services/api/withRetry.js</code> (model fallback)</li>
   <li><strong>hermes-agent</strong>: <code>agent/error_classifier.py:24</code> (FailoverReason), <code>agent/turn_retry_state.py:33</code> (TurnRetryState), <code>agent/retry_utils.py:19</code> (exponential backoff)</li>
+  <li><strong>DeepAgents</strong>: <code>middleware/patch_tool_calls.py:11</code> (PatchToolCallsMiddleware), SummarizationMiddleware (emergency fallback on ContextOverflowError), AnthropicPromptCachingMiddleware (caching failure fallback), ModelRetryMiddleware + ModelFallbackMiddleware from langchain.agents</li>
+  <li><strong>DeerFlow</strong>: LLMErrorHandlingMiddleware (provider failure normalization), ToolErrorHandlingMiddleware (exception-to-ToolMessage conversion), DanglingToolCallMiddleware (orphaned tool call injection), LoopDetectionMiddleware (hard-stop on repeated tool-call loops), SandboxAuditMiddleware (pre-execution safety), SubAgentExecutor (900s timeout), <code>worker.py:164-199</code> (pre-run checkpoint rollback)</li>
   <li><strong>codex</strong>: <code>codex-rs/state/src/runtime/recovery.rs:71</code> (backup_runtime_db_for_fresh_start), <code>is_sqlite_corruption_error()</code> (codes 11, 26)</li>
   <li><strong>nanobot</strong>: <code>nanobot/providers/base.py:817</code> (_run_with_retry), <code>nanobot/agent/runner.py:528</code> (length recovery), <code>nanobot/agent/loop.py:1725</code> (checkpoint restore)</li>
   <li><strong>opencode</strong>: <code>packages/core/src/session/runner/index.ts:20</code> (RunError), <code>compactAfterOverflow()</code>, <code>failUnsettledTools()</code></li>
@@ -403,6 +505,8 @@ type RunError =
 <ul>
   <li>If you want the <strong>most intricate</strong> recovery system: trace <code>claude-code/src/query.ts</code> — start at <code>queryLoop()</code> (line 241) and follow each terminal reason and recovery transition. The entire state machine is in one file.</li>
   <li>If you want the <strong>most systematic</strong> classification: read <code>hermes-agent/agent/error_classifier.py</code> — the priority-ordered pipeline from provider patterns to transport heuristics is a masterclass in error triage.</li>
+  <li>If you want the <strong>most composable</strong> recovery architecture: study DeepAgents' middleware stack — each <code>wrap_model_call()</code> and <code>wrap_tool_call()</code> acts as an error boundary. The middleware list <em>is</em> the recovery documentation.</li>
+  <li>If you want the <strong>most granular</strong> error boundaries: trace DeerFlow's 19-middleware chain — especially the LoopDetectionMiddleware (the only architectural loop detector across all 9 codebases) and the worker-level checkpoint rollback in <code>worker.py:164-199</code>.</li>
   <li>If you want the <strong>most practical</strong> pattern to adopt: study <code>hermes-agent/agent/turn_retry_state.py</code> — the one-shot guard pattern is simple, testable, and prevents the most common class of bugs in agent recovery (infinite retry loops).</li>
 </ul>
 

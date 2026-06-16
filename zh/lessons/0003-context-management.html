@@ -23,7 +23,7 @@
 
 <h1>第3课：上下文管理</h1>
 <p class="subtitle">AI agent 如何管理其上下文窗口 — compact、token 预算以及树模型。</p>
-<p class="meta">2026年6月 · 7个主要源代码库 · <a href="0003-context-management.html">永久链接</a></p>
+<p class="meta">2026年6月 · 9个主要源代码库 · <a href="0003-context-management.html">永久链接</a></p>
 
 <p class="sidenote">上下文窗口是每个 agent 的<strong>最严苛资源约束</strong>。上下文太少则 agent 忘记它在做什么；太多则 LLM 变慢、变贵、变混乱。每个代码库都不同地解决这个问题，但它们面对同一个难题：如何保留重要的、丢弃次要的。</p>
 
@@ -31,7 +31,7 @@
 
 <h2>四种基本策略</h2>
 
-<p>纵观七个代码库，浮现出四种截然不同的 compact 策略：</p>
+<p>纵观九个代码库，浮现出四种截然不同的 compact 策略：</p>
 
 <div class="spectrum">
   <span class="left">主动式（调用之前）</span>
@@ -48,7 +48,7 @@
 
 <h2>最复杂的方案：claude-code 的七层架构</h2>
 
-<p>Claude Code 拥有七个代码库中最精密的上下文管理。七个不同层次协同工作：</p>
+<p>Claude Code 拥有九个代码库中最精密的上下文管理。七个不同层次协同工作：</p>
 
 <h3>第一层：Token 预算（守门人）</h3>
 
@@ -199,12 +199,58 @@ RESTORE → COMPACT → COMMAND → BUILD → RUN → SAVE → RESPOND → DONE<
 
 <p>权衡很明确：codex 和 opencode 有<em>零行摘要代码</em>需要维护、调试或安全审查。但它们也对摘要质量<em>零控制</em>。如果钩子脚本或 provider 产生糟糕的摘要，没有回退、没有补救。</p>
 
+<h2>中间件驱动的上下文管理（deepagents、deer-flow）</h2>
+
+<p>DeepAgents 和 DeerFlow 引入了一种根本不同的模式：上下文管理作为<strong>显式命名的中间件</strong>，而非 agent 循环内部的隐式逻辑。这与第<a href="0001-agent-loop.html">1课</a>和第<a href="0002-tool-system.html">2课</a>中看到的"显式中间件 vs 隐式耦合"模式相同 — 但应用到了上下文管理上。在现有的七个代码库中，compact、token 计数和内容修剪是在 agent 循环内部调用的函数。而在 DeepAgents 和 DeerFlow 中，它们是具有清晰接口和可配置触发器的独立中间件类。</p>
+
+<h3>DeepAgents：SummarizationMiddleware 和 FilesystemMiddleware</h3>
+
+<p>DeepAgents 在两个专用的中间件类中编码上下文管理：</p>
+
+<p><strong>SummarizationMiddleware</strong>（<code>middleware/summarization.py:1003</code>）包装 <code>model_call</code>，在超过 token 阈值时执行 LLM 驱动的摘要。当模型有已知的 <code>max_input_tokens</code> 时，默认触发器为 <code>("fraction", 0.85)</code>，否则为 <code>("tokens", 170000)</code>。这使得 DeepAgents 具有与 claude-code 和 hermes-agent 相同的主动姿态 — 在调用之前检查，而非在错误之后。如果 LLM 摘要调用本身因 <code>ContextOverflowError</code> 失败，它会回退到紧急摘要（截断旧的工具参数）。</p>
+
+<p><strong>FilesystemMiddleware</strong>（<code>middleware/filesystem.py:692-749</code>）自动将大型工具结果卸载到文件系统后端，在上下文中替换为预览。token 限制为工具结果 20,000、人工注入消息 50,000。这是一种自动内容门控机制 — LLM 看到的是预览而非原始转储，完整内容按需检索。它在功能上等同于 hermes-agent 的工具输出修剪（阶段 1）和 claude-code 的微 compact，但实现为可独立开启或关闭的独立中间件层。</p>
+
+<p>DeepAgents 还在消息上使用 <strong>DeltaChannel</strong>（<code>graph.py:67</code>），通过仅存储增量将检查点增长从 O(N²) 降至 O(N)，每 50 步创建一次完整快照。这是一种结构优化 — 不改变 LLM 看到的内容，但大幅降低在有状态图中维护对话历史的存储成本。</p>
+
+<p><code>graph.py:70-143</code> 中的系统提示词组装顺序为：USER →（BASE 或 CUSTOM）→ SUFFIX，以空行连接。这是比 claude-code 的 5 优先级合并更简单的组合模型，但实现了相同的目标：每次对话顶部的固定开销可针对不同 agent 模式进行调整。</p>
+
+<h3>DeerFlow：19 个中间件管道与延迟工具过滤</h3>
+
+<p>DeerFlow 通过 19 个中间件链将中间件模式推向了更远：</p>
+
+<pre><code>ThreadDataMiddleware → UploadsMiddleware → SandboxMiddleware →
+DanglingToolCallMiddleware → SummarizationMiddleware → TodoListMiddleware →
+... → ClarificationMiddleware（共 19 个）</code></pre>
+
+<p>每个中间件处理一个特定的横切关注点。对于上下文管理，有三个特别相关：</p>
+
+<ul>
+  <li><strong>DynamicContextMiddleware</strong> 将当前日期和记忆作为 <code>&lt;system-reminder&gt;</code> 注入到第一条 <code>HumanMessage</code> 中。这是 hermes-agent 三源上下文组装（MEMORY.md + USER.md + FTS5）的轻量替代方案 — 它注入动态状态而不占用永久的系统提示词空间。</li>
+  <li><strong>SummarizationMiddleware</strong> 通过 <code>config.yaml</code> 可配置：触发器可以基于 token、消息数量或最大输入的比例。保留最近消息同时摘要较旧消息。<code>agent/_config.py:56</code> 中的 <code>ContextConfig</code> 暴露 <code>trigger_ratio</code>（默认 0.8）、<code>reserve_ratio</code>（默认 0.1）、<code>compression_prompt</code> 和 <code>summary_template</code> — 全部可用户配置而无需修改源码。</li>
+  <li><strong>DeferredToolFilterMiddleware</strong> 在 <code>tool_search</code> 提升操作之前向 LLM 隐藏 MCP 工具 schema。这是一种<em>先发制人</em>的上下文节省策略：不将全部可用工具 schema 在每个系统提示词中发送（每轮可能消耗数千 token），仅被提升的工具可见。其余推迟到需要时。</li>
+</ul>
+
+<p>延迟工具过滤是 DeerFlow 对上下文管理最独特的贡献。在 claude-code 或 hermes-agent 等代码库中，所有工具 schema 始终存在于系统提示词中。对于拥有 50+ 个 MCP 工具的 agent 来说，那是每轮 5,000–15,000 token 的固定开销。DeerFlow 的方法将其缩减为仅 agent 明确请求的工具 — 在功能上等同于工具定义的懒加载。</p>
+
+<h3>显式 vs 隐式：跨课程的中间件模式</h3>
+
+<p>这是我们代码库调查中第三次出现显式中间件模式：</p>
+
+<ul>
+  <li><strong>第 1 课（Agent 循环）：</strong> DeepAgents 和 DeerFlow 将循环外化为中间件，而其他 7 个代码库将循环逻辑直接嵌入 agent 中。</li>
+  <li><strong>第 2 课（工具系统）：</strong> DeepAgents 通过中间件（ToolNormalizationMiddleware）规范化工具，而其他代码库在工具注册内部临时处理规范化。</li>
+  <li><strong>第 3 课（上下文管理）：</strong> DeepAgents 和 DeerFlow 将 compact、内容门控和工具可见性变成命名的中间件类，而其他 7 个代码库在循环内部隐式处理这些关注点。</li>
+</ul>
+
+<p>模式是一致的：中间件使上下文管理<strong>可组合</strong>（可以添加/移除/重新排序策略）、<strong>可测试</strong>（每个中间件是隔离的单元）和<strong>可观察</strong>（中间件名称准确告诉你正在应用哪个关注点）。代价是概念上的开销 — 一个 19 个中间件的链条比单个 <code>buildPostCompactMessages()</code> 函数更难端到端理解。但对于需要混合搭配上下文策略的复杂 agent，中间件方法比循环内部的临时条件判断更具可扩展性。</p>
+
 <h2>为什么树模型重要</h2>
 
 <p>扁平和树之间的区别不只是数据结构选择 — 它决定了哪些操作是可能的：</p>
 
 <table>
-  <tr><th>操作</th><th>扁平数组（claude-code、hermes-agent、nanobot）</th><th>树（pi-mono、openclaw）</th></tr>
+  <tr><th>操作</th><th>扁平数组（claude-code、hermes-agent、nanobot、deepagents、deer-flow、codex、opencode）</th><th>树（pi-mono、openclaw）</th></tr>
   <tr><td><strong>撤销 compact</strong></td><td>必须保留旧数组副本或重新请求</td><td>更改哪些节点为"活跃" — 无数据丢失</td></tr>
   <tr><td><strong>从对话中间分支</strong></td><td>复制数组到该点</td><td>添加新分支节点 — O(1)</td></tr>
   <tr><td><strong>合并分支</strong></td><td>手动协调两个数组</td><td>遍历两棵子树，生成合并摘要节点</td></tr>
@@ -216,13 +262,13 @@ RESTORE → COMPACT → COMMAND → BUILD → RUN → SAVE → RESPOND → DONE<
 <h2>对比总表</h2>
 
 <table>
-  <tr><th>维度</th><th>claude-code</th><th>pi-mono</th><th>openclaw</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th></tr>
-  <tr><td><strong>Compact 类型</strong></td><td>主动 + 被动</td><td>被动</td><td>被动</td><td>主动（预检查）+ 被动</td><td>主动（每轮）</td><td>钩子（shell 命令）</td><td>委托（provider）</td></tr>
-  <tr><td><strong>摘要模型</strong></td><td>LLM（内部）</td><td>LLM（内部）</td><td>LLM（内部）</td><td>LLM + 回退规则</td><td>LLM（多轮）</td><td>无（外部）</td><td>无（委托）</td></tr>
-  <tr><td><strong>Token 估算</strong></td><td>从上次 API 调用向后遍历</td><td>Provider 报告 + 估算</td><td>Provider 报告 + 估算</td><td>tiktoken + 估算</td><td>tiktoken + 估算</td><td>tiktoken</td><td>Provider</td></tr>
-  <tr><td><strong>历史模型</strong></td><td>扁平数组 + commit-log 折叠</td><td>树（类型化条目）</td><td>树（类型化条目）</td><td>扁平数组</td><td>扁平数组（上限 120）</td><td>扁平数组（类型化标记）</td><td>扁平数组</td></tr>
-  <tr><td><strong>尾部保护</strong></td><td>预留 token + 自动 compact 阈值</td><td>keepRecentTokens: 20000</td><td>keepRecentTokens: 20000</td><td>防抖动（10% 底线）</td><td>保留最后 8 条消息</td><td>由钩子定义</td><td>由 Provider 定义</td></tr>
-  <tr><td><strong>独特功能</strong></td><td>七层体系 + 收益递减检测</td><td>跨轮 compact</td><td>增量摘要更新</td><td>参考前缀 + FTS5</td><td>五轮合并</td><td>完全可配置的钩子</td><td>零 compact 代码</td></tr>
+  <tr><th>维度</th><th>claude-code</th><th>pi-mono</th><th>openclaw</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th><th>deepagents</th><th>deer-flow</th></tr>
+  <tr><td><strong>Compact 类型</strong></td><td>主动 + 被动</td><td>被动</td><td>被动</td><td>主动（预检查）+ 被动</td><td>主动（每轮）</td><td>钩子（shell 命令）</td><td>委托（provider）</td><td>中间件（主动，LLM 驱动）</td><td>中间件（主动，可配置）</td></tr>
+  <tr><td><strong>摘要模型</strong></td><td>LLM（内部）</td><td>LLM（内部）</td><td>LLM（内部）</td><td>LLM + 回退规则</td><td>LLM（多轮）</td><td>无（外部）</td><td>无（委托）</td><td>LLM（中间件）+ 紧急回退</td><td>LLM（中间件）</td></tr>
+  <tr><td><strong>Token 估算</strong></td><td>从上次 API 调用向后遍历</td><td>Provider 报告 + 估算</td><td>Provider 报告 + 估算</td><td>tiktoken + 估算</td><td>tiktoken + 估算</td><td>tiktoken</td><td>Provider</td><td>tiktoken + 比例触发（0.85）</td><td>tiktoken（trigger_ratio: 0.8）</td></tr>
+  <tr><td><strong>历史模型</strong></td><td>扁平数组 + commit-log 折叠</td><td>树（类型化条目）</td><td>树（类型化条目）</td><td>扁平数组</td><td>扁平数组（上限 120）</td><td>扁平数组（类型化标记）</td><td>扁平数组</td><td>扁平数组 + DeltaChannel（O(N) 检查点）</td><td>扁平数组（19 个中间件链）</td></tr>
+  <tr><td><strong>尾部保护</strong></td><td>预留 token + 自动 compact 阈值</td><td>keepRecentTokens: 20000</td><td>keepRecentTokens: 20000</td><td>防抖动（10% 底线）</td><td>保留最后 8 条消息</td><td>由钩子定义</td><td>由 Provider 定义</td><td>比例阈值（0.85）或 170K token</td><td>reserve_ratio: 0.1</td></tr>
+  <tr><td><strong>独特功能</strong></td><td>七层体系 + 收益递减检测</td><td>跨轮 compact</td><td>增量摘要更新</td><td>参考前缀 + FTS5</td><td>五轮合并</td><td>完全可配置的钩子</td><td>零 compact 代码</td><td>FilesystemMiddleware 自动卸载大结果</td><td>DeferredToolFilter 隐藏 MCP schema</td></tr>
 </table>
 
 <h2>设计启发</h2>
@@ -256,6 +302,8 @@ RESTORE → COMPACT → COMMAND → BUILD → RUN → SAVE → RESPOND → DONE<
   <li><strong>nanobot：</strong> 多轮合并（最多 5 轮）提供自然的兜底。如果 5 轮后上下文仍然放不下，最旧的消息会被<em>截断</em>（非摘要）作为最后手段。</li>
   <li><strong>codex：</strong> 钩子脚本完全控制失败处理。<code>PostCompactRequest</code> 携带之前/之后的 token 计数 — 一个编写良好的钩子可以检测到缩减不足并使用不同参数重试。</li>
   <li><strong>opencode：</strong> 失败处理完全是 provider 的责任。如果 provider 的 compact 失败，agent 直接停止工作。</li>
+  <li><strong>deepagents：</strong> 如果 LLM 摘要引发 <code>ContextOverflowError</code>，SummarizationMiddleware 回退到紧急摘要 — 截断旧的工具参数而非尝试 LLM 摘要。这是结构性回退，而非重试。</li>
+  <li><strong>deer-flow：</strong> 可配置的 <code>reserve_ratio</code>（默认 0.1）确保始终为 LLM 响应预留空间，因此 compact 失败表现为截断的摘要而非崩溃的轮次。19 个中间件链意味着一个中间件（如 SummarizationMiddleware）的失败不会阻止其他中间件（如 TodoListMiddleware）运行。</li>
 </ul>
 
 <h2>测验</h2>
@@ -289,11 +337,29 @@ RESTORE → COMPACT → COMMAND → BUILD → RUN → SAVE → RESPOND → DONE<
     <div class="option" data-q="3" data-a="d">将截断点移到最近的轮次边界</div>
   </div>
   <div class="feedback" id="feedback3"></div>
+
+  <div class="question">Q4. DeepAgents 的 SummarizationMiddleware 在模型有已知 max_input_tokens 时的默认触发器是什么？</div>
+  <div class="options">
+    <div class="option" data-q="4" data-a="a">("tokens", 170000)</div>
+    <div class="option" data-q="4" data-a="b">("fraction", 0.85)</div>
+    <div class="option" data-q="4" data-a="c">("fraction", 0.9)</div>
+    <div class="option" data-q="4" data-a="d">("messages", 100)</div>
+  </div>
+  <div class="feedback" id="feedback4"></div>
+
+  <div class="question">Q5. DeerFlow 对上下文管理最独特的贡献是什么？</div>
+  <div class="options">
+    <div class="option" data-q="5" data-a="a">19 个中间件链架构</div>
+    <div class="option" data-q="5" data-a="b">带有可配置 trigger_ratio 的 SummarizationMiddleware</div>
+    <div class="option" data-q="5" data-a="c">DeferredToolFilterMiddleware 在提升之前隐藏 MCP 工具 schema</div>
+    <div class="option" data-q="5" data-a="d">注入日期和记忆的 DynamicContextMiddleware</div>
+  </div>
+  <div class="feedback" id="feedback5"></div>
 </div>
 
 <script>
 (function() {
-  var answers = { 1: 'c', 2: 'b', 3: 'c' };
+  var answers = { 1: 'c', 2: 'b', 3: 'c', 4: 'b', 5: 'c' };
   document.querySelectorAll('.option').forEach(function(opt) {
     opt.addEventListener('click', function() {
       var q = this.dataset.q;
@@ -332,6 +398,8 @@ RESTORE → COMPACT → COMMAND → BUILD → RUN → SAVE → RESPOND → DONE<
   <li><strong>nanobot</strong>：<code>nanobot/agent/loop.py</code>（TurnState 枚举 — RESTORE→COMPACT→...→DONE），<code>nanobot/agent/autocompact.py</code>（AutoCompact，基于 TTL，保留最后 8 条），<code>nanobot/agent/memory.py</code>（Consolidator.maybe_consolidate_by_tokens，5 轮），<code>nanobot/agent/context.py</code>（ContextBuilder 组装顺序）</li>
   <li><strong>codex</strong>：<code>codex-rs/hooks/src/events/compact.rs</code>（PreCompactRequest，PostCompactRequest，钩子驱动，类型化标记）</li>
   <li><strong>opencode</strong>：<code>packages/core/src/</code>（委托给 @opencode-ai/core，provider 级 compact）</li>
+  <li><strong>deepagents</strong>：<code>middleware/summarization.py:1003</code>（SummarizationMiddleware 包装 model_call，比例/token 触发器，紧急回退），<code>middleware/filesystem.py:692-749</code>（FilesystemMiddleware 自动卸载大型工具结果，20K 工具结果 / 50K 人工消息限制），<code>graph.py:67</code>（DeltaChannel 将检查点增长从 O(N²) 降至 O(N)，每 50 步快照），<code>graph.py:70-143</code>（系统提示词组装：USER → BASE/CUSTOM → SUFFIX）</li>
+  <li><strong>deer-flow</strong>：<code>agent/_config.py:56</code>（ContextConfig：trigger_ratio=0.8、reserve_ratio=0.1、compression_prompt、summary_template），19 个中间件链（ThreadDataMiddleware → UploadsMiddleware → SandboxMiddleware → DanglingToolCallMiddleware → SummarizationMiddleware → TodoListMiddleware → ... → ClarificationMiddleware），DynamicContextMiddleware（将日期+记忆作为 <code>&lt;system-reminder&gt;</code> 注入第一条 HumanMessage），DeferredToolFilterMiddleware（在 <code>tool_search</code> 提升之前隐藏 MCP 工具 schema）</li>
 </ol>
 
 <h2>推荐后续阅读</h2>
