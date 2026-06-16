@@ -11,8 +11,6 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
-  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
-  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -35,14 +33,27 @@
 
 <p>Every agent error falls into one of five categories. Each codebase handles them differently, but the categories are universal:</p>
 
-<div class="diagram">
-┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
-│   API ERRORS    │  │ CONTEXT OVERFLOW│  │   MALFORMED     │  │  TOOL FAILURES  │  │    ABORTS       │
-│                 │  │                 │  │   RESPONSES     │  │                 │  │                 │
-│ 401, 429, 5xx,  │  │ Prompt too long,│  │  JSON parse     │  │  Timeout,       │  │  User cancel,   │
-│ timeout,        │  │ token budget    │  │  failure,       │  │  non-zero exit, │  │  hook veto,     │
-│ connection error │  │ exceeded       │  │  stream break   │  │  sandbox deny   │  │  max turns      │
-└─────────────────┘  └─────────────────┘  └─────────────────┘  └─────────────────┘  └─────────────────┘
+<div class="flowchart wide">
+  <div class="fc-box">
+    <div class="fc-label">API ERRORS</div>
+    <div class="fc-desc">401, 429, 5xx, timeout, connection error</div>
+  </div>
+  <div class="fc-box">
+    <div class="fc-label">CONTEXT OVERFLOW</div>
+    <div class="fc-desc">Prompt too long, token budget exceeded</div>
+  </div>
+  <div class="fc-box">
+    <div class="fc-label">MALFORMED RESPONSES</div>
+    <div class="fc-desc">JSON parse failure, stream break</div>
+  </div>
+  <div class="fc-box">
+    <div class="fc-label">TOOL FAILURES</div>
+    <div class="fc-desc">Timeout, non-zero exit, sandbox deny</div>
+  </div>
+  <div class="fc-box">
+    <div class="fc-label">ABORTS</div>
+    <div class="fc-desc">User cancel, hook veto, max turns</div>
+  </div>
 </div>
 
 <h2>Two poles of recovery philosophy</h2>

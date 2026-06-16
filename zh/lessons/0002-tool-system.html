@@ -11,8 +11,6 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
-  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
-  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -35,15 +33,26 @@
 
 <p>每次工具交互都遵循以下管道：</p>
 
-<div class="diagram">
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│   定义        │ →  │   注册        │ →  │   调度        │ →  │   规范化      │
-│   DEFINE     │    │  REGISTER    │    │  DISPATCH    │    │  NORMALIZE   │
-│              │    │              │    │              │    │              │
-│ Schema、     │    │ 注册表、     │    │ 执行、       │    │ 结果 →       │
-│ 参数、       │    │ 发现、       │    │ 沙箱、       │    │ LLM 可读     │
-│ 描述         │    │ 可用性       │    │ 权限         │    │ 消息         │
-└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+<div class="flowchart">
+  <div class="fc-box">
+    <div class="fc-label">定义 DEFINE</div>
+    <div class="fc-desc">Schema、参数、描述</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">注册 REGISTER</div>
+    <div class="fc-desc">注册表、发现、可用性</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">调度 DISPATCH</div>
+    <div class="fc-desc">执行、沙箱、权限</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">规范化 NORMALIZE</div>
+    <div class="fc-desc">结果 → LLM 可读消息</div>
+  </div>
 </div>
 
 <h2>四种设计哲学</h2>

@@ -11,8 +11,6 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
-  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
-  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -35,14 +33,26 @@
 
 <p>Every tool interaction follows this pipeline:</p>
 
-<div class="diagram">
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│   DEFINE     │ →  │  REGISTER    │ →  │  DISPATCH    │ →  │  NORMALIZE   │
-│              │    │              │    │              │    │              │
-│ Schema,      │    │ Registry,    │    │ Execute,     │    │ Result →     │
-│ params,      │    │ discovery,   │    │ sandbox,     │    │ LLM-ready    │
-│ description  │    │ availability │    │ permissions  │    │ message      │
-└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+<div class="flowchart">
+  <div class="fc-box">
+    <div class="fc-label">DEFINE</div>
+    <div class="fc-desc">Schema, params, description</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">REGISTER</div>
+    <div class="fc-desc">Registry, discovery, availability</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">DISPATCH</div>
+    <div class="fc-desc">Execute, sandbox, permissions</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">NORMALIZE</div>
+    <div class="fc-desc">Result → LLM-ready message</div>
+  </div>
 </div>
 
 <h2>Four design philosophies</h2>

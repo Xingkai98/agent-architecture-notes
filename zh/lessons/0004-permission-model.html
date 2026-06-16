@@ -11,8 +11,6 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #adb5bd, #ffc107, #dc3545); border-radius: 3px; }
-  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
-  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -97,15 +95,26 @@ buildTool({
 
 <p><code>codex-rs/core/src/tools/orchestrator.rs</code> 中的 <code>ToolOrchestrator</code> 使每个工具通过一个四阶段管道：</p>
 
-<div class="diagram">
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│   审批        │ →  │   沙箱        │ →  │   执行        │ →  │   重试        │
-│  APPROVAL    │    │  SELECTION   │    │  EXECUTE     │    │  （提升沙箱） │
-│              │    │              │    │              │    │              │
-│ 用户提示     │    │ Landlock /   │    │ 在沙箱内     │    │ 如果沙箱     │
-│ 或自动       │    │ Win / Mac    │    │ 运行工具     │    │ 阻止，以更高  │
-│ 批准         │    │ 沙箱选择     │    │              │    │ 级别重试     │
-└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+<div class="flowchart">
+  <div class="fc-box">
+    <div class="fc-label">审批 APPROVAL</div>
+    <div class="fc-desc">用户提示或自动批准</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">沙箱选择 SANDBOX</div>
+    <div class="fc-desc">Landlock / Win / Mac 沙箱选择</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">执行 EXECUTE</div>
+    <div class="fc-desc">在沙箱内运行工具</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">重试 RETRY（提升沙箱）</div>
+    <div class="fc-desc">如果沙箱阻止，以更高级别重试</div>
+  </div>
 </div>
 
 <p><strong>审批：</strong> 执行前，编排器检查工具是否需要用户批准。网络访问有自己独立的审批系统，支持两种模式：<strong>立即</strong>（现在询问）和<strong>延迟</strong>（允许工具运行但阻止网络使用直到批准）。</p>
