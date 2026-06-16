@@ -18,7 +18,7 @@
 <body>
 
 <nav class="lang-nav">
-  <a href="../lessons/0003-context-management.html" data-lang="en">EN</a>
+  <a href="../../lessons/0003-context-management.html" data-lang="en">EN</a>
   <span>/</span>
   <a href="#" data-lang="zh">中文</a>
 </nav>
@@ -203,7 +203,7 @@ RESTORE → COMPACT → COMMAND → BUILD → RUN → SAVE → RESPOND → DONE<
 
 <h2>中间件驱动的上下文管理（deepagents、deer-flow）</h2>
 
-<p>DeepAgents 和 DeerFlow 引入了一种根本不同的模式：上下文管理作为<strong>显式命名的中间件</strong>，而非 agent 循环内部的隐式逻辑。这与第<a href="0001-agent-loop.html">1课</a>和第<a href="0002-tool-system.html">2课</a>中看到的"显式中间件 vs 隐式耦合"模式相同 — 但应用到了上下文管理上。在现有的七个代码库中，compact、token 计数和内容修剪是在 agent 循环内部调用的函数。而在 DeepAgents 和 DeerFlow 中，它们是具有清晰接口和可配置触发器的独立中间件类。</p>
+<p>DeepAgents 和 DeerFlow 引入了一种根本不同的模式：上下文管理作为<strong>显式命名的中间件</strong>，而非 agent 循环内部的隐式逻辑。这与第<a href="0001-core-agent-loop.html">1课</a>和第<a href="0002-tool-system.html">2课</a>中看到的"显式中间件 vs 隐式耦合"模式相同 — 但应用到了上下文管理上。在现有的七个代码库中，compact、token 计数和内容修剪是在 agent 循环内部调用的函数。而在 DeepAgents 和 DeerFlow 中，它们是具有清晰接口和可配置触发器的独立中间件类。</p>
 
 <h3>DeepAgents：SummarizationMiddleware 和 FilesystemMiddleware</h3>
 
