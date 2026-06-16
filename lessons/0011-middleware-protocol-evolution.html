@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0011: From AgentExecutor to Middleware Protocol</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  :root { --bg: #fffff8; --text: #111; --muted: #666; --accent: #a00; --rule: #ddd; --code-bg: #f4f4f0; --highlight: #fffacd; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 6rem; background: var(--bg); color: var(--text); line-height: 1.5; }
+  h1 { font-size: 2rem; margin-bottom: 0.15rem; }
+  h2 { font-size: 1.35rem; margin: 2.2rem 0 0.6rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  h3 { font-size: 1.08rem; margin: 1.5rem 0 0.5rem; }
+  p { font-size: 0.95rem; margin-bottom: 0.8rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+  li { font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.25rem; }
+  .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; font-style: italic; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; margin-bottom: 0.5rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.85rem; }
+  th, td { padding: 0.45rem 0.55rem; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; background: #f8f8f0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:nth-child(even) td { background: #fafaf6; }
+  code { font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.87rem; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; margin: 0.8rem 0 1.2rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.45; border-left: 3px solid var(--accent); }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid var(--rule); padding-left: 1rem; margin: 1rem 0; color: var(--muted); font-style: italic; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .quiz { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1.5rem 0; }
+  .quiz h3 { margin-top: 0; }
+  .quiz .question { margin: 1rem 0 0.5rem; font-weight: 600; }
+  .quiz .options { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 1rem; }
+  .quiz .option { padding: 0.35rem 0.6rem; cursor: pointer; border: 1px solid var(--rule); background: #fff; font-size: 0.88rem; }
+  .quiz .option:hover { background: var(--highlight); }
+  .quiz .option.correct { background: #d4edda; border-color: #28a745; }
+  .quiz .option.wrong { background: #f8d7da; border-color: #dc3545; }
+  .quiz .feedback { margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.5rem; }
+  .callout { background: #fffacd; border: 1px solid #e6da8a; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav"><a href="#" data-lang="en">EN</a><span>/</span><a href="#" data-lang="zh">中文</a></nav>
+
+<h1>Lesson 0011: From AgentExecutor to Middleware Protocol</h1>
+<p class="subtitle">How LangChain's agent system evolved from a callback-driven while-loop to a composable middleware stack on LangGraph.</p>
+<p class="meta">Course 2: Agent Infrastructure · June 2026 · <a href="0011-middleware-protocol-evolution.html">Permalink</a></p>
+
+<p>LangChain's repository contains <strong>two generations</strong> of agent system side by side. The classic <code>AgentExecutor</code> (now deprecated) is a callback-driven while-loop — the same pattern we saw in Course 1's pi-mono and hermes-agent. The V1 <code>create_agent</code> (current) is a middleware stack compiled to a LangGraph StateGraph — the same pattern that deepagents and deer-flow extend. This lesson traces the evolution and extracts the architectural lesson: <strong>callbacks couple, middleware composes</strong>.</p>
+
+<p class="sidenote">The fact that both systems coexist in the same repo is unusual and valuable — it's a fossil record of the architectural transition from imperative agent loops to declarative middleware stacks. Few production codebases preserve their deprecated architecture alongside the replacement.</p>
+
+<h2>AgentExecutor: the while-loop era</h2>
+
+<p>The <code>AgentExecutor</code> class at <code>langchain_classic/agents/agent.py:1012</code> is a textbook while-loop agent. Its <code>_call()</code> method at line 1570 iterates until <code>AgentFinish</code> or <code>max_iterations</code> (default 15):</p>
+
+<pre><code># AgentExecutor._call() — langchain_classic/agents/agent.py:1570
+while self._should_continue(iterations, time_elapsed):
+    next_step = self._take_next_step(...)        # agent.plan() → execute tool → observe
+    if isinstance(next_step, AgentFinish):
+        return self._return(next_step, ...)       # terminal state
+    intermediate_steps.extend(next_step)          # (action, observation) pairs
+    iterations += 1
+    time_elapsed = time.time() - start_time</code></pre>
+
+<p>Each iteration calls <code>agent.plan()</code> to get the next <code>AgentAction</code>, then <code>_perform_agent_action()</code> at line 1380 to execute the tool via <code>tool.run()</code>, generating an observation. The loop continues until either the LLM returns a final answer or the iteration/time budget is exhausted.</p>
+
+<p>Instrumentation is <strong>callback-based</strong>: <code>CallbackManager</code> fires <code>on_agent_action</code>, <code>on_agent_finish</code>, <code>on_tool_start</code>, <code>on_tool_end</code> at fixed points. There is no way to intercept or modify the execution flow from a callback — callbacks are observers, not participants. If you want to add retry logic, context summarization, or permission checks, you must modify the executor itself or wrap it externally.</p>
+
+<h2>create_agent: the graph era</h2>
+
+<p>The V1 <code>create_agent()</code> at <code>langchain_v1/langchain/agents/factory.py:787</code> takes a completely different approach. Instead of a while-loop, it builds a <code>StateGraph</code> with two nodes — "model" and "tools" — connected by conditional edges:</p>
+
+<pre><code># create_agent() — factory.py:787
+StateGraph(AgentState)
+  .add_node("model", model_node)           # THINK: call LLM
+  .add_node("tools", ToolNode(tools))      # ACT: execute tools
+  .add_edge(START, "model")
+  .add_conditional_edges("model", model_to_tools, {"tools": "tools", END: END})
+  .add_edge("tools", "model")              # OBSERVE: feed results back
+  .compile(checkpointer=checkpointer)</code></pre>
+
+<p>The recursion limit is 9999 (vs. AgentExecutor's 15) — the graph model assumes LangGraph's checkpointing and streaming will handle the unbounded execution safely. The real architectural innovation is not the graph itself, but <strong>how middleware hooks become graph nodes</strong>.</p>
+
+<h2>The 6-hook AgentMiddleware protocol</h2>
+
+<p><code>AgentMiddleware</code> at <code>middleware/types.py:383</code> defines six hook points:</p>
+
+<div class="tbl"><table>
+  <tr><th>Hook</th><th>When it fires</th><th>Purpose</th></tr>
+  <tr><td><code>before_agent</code></td><td>Once before the loop starts</td><td>Setup, load state, initialize resources</td></tr>
+  <tr><td><code>before_model</code></td><td>Before each LLM call</td><td>Modify system prompt, inject context</td></tr>
+  <tr><td><code>after_model</code></td><td>After each LLM call</td><td>Inspect response, detect tool calls</td></tr>
+  <tr><td><code>after_agent</code></td><td>Once after the loop ends</td><td>Cleanup, save state, emit events</td></tr>
+  <tr><td><code>wrap_model_call</code></td><td>Wraps the LLM invocation</td><td>Retry, fallback, rewrite request</td></tr>
+  <tr><td><code>wrap_tool_call</code></td><td>Wraps tool execution</td><td>Retry, monitor, modify input/output</td></tr>
+</table></div>
+
+<p>The critical architectural difference from callbacks: <strong>wrap hooks can intercept</strong>. A <code>wrap_model_call</code> handler receives the <code>ModelRequest</code> and a <code>handler</code> callback that invokes the actual model. The middleware can modify the request before passing it to the handler, catch exceptions and retry, or even skip the handler entirely. This is the difference between observing execution and participating in it.</p>
+
+<p>In the compiled graph, the <code>before_agent</code>, <code>before_model</code>, <code>after_model</code>, and <code>after_agent</code> hooks become <strong>separate graph nodes</strong>. The <code>wrap_model_call</code> and <code>wrap_tool_call</code> hooks are composed as <strong>nested onion layers</strong> via <code>_chain_model_call_handlers()</code> at factory.py:234 — first-in-list is outermost, meaning it executes first on the way in and last on the way out.</p>
+
+<h2>Built-in middleware catalog</h2>
+
+<p>LangChain V1 ships with 15+ built-in middleware implementations at <code>middleware/</code>:</p>
+
+<div class="tbl"><table>
+  <tr><th>Middleware</th><th>Hook(s) used</th><th>What it does</th></tr>
+  <tr><td><strong>SummarizationMiddleware</strong></td><td>wrap_model_call</td><td>Auto-compact conversation when token budget exceeded</td></tr>
+  <tr><td><strong>TodoListMiddleware</strong></td><td>before_model (inject tool)</td><td>Exposes <code>write_todos</code> tool for task tracking</td></tr>
+  <tr><td><strong>HumanInTheLoopMiddleware</strong></td><td>before_model (interrupt)</td><td>Pause execution for human approval</td></tr>
+  <tr><td><strong>ModelRetryMiddleware</strong></td><td>wrap_model_call</td><td>Retry on transient LLM errors</td></tr>
+  <tr><td><strong>ModelFallbackMiddleware</strong></td><td>wrap_model_call</td><td>Switch to backup model on failure</td></tr>
+  <tr><td><strong>ToolRetryMiddleware</strong></td><td>wrap_tool_call</td><td>Retry failed tool calls</td></tr>
+  <tr><td><strong>ShellToolMiddleware</strong></td><td>wrap_tool_call (policy)</td><td>Sandbox shell execution (Codex/Docker/Host)</td></tr>
+  <tr><td><strong>PIIMiddleware</strong></td><td>after_model</td><td>Detect and redact PII in responses</td></tr>
+  <tr><td><strong>ContextEditingMiddleware</strong></td><td>before_model</td><td>Clear tool uses, edit conversation context</td></tr>
+  <tr><td><strong>ProviderToolSearchMiddleware</strong></td><td>before_model</td><td>Search for tools from LLM provider</td></tr>
+</table></div>
+
+<p>Each middleware is self-contained — a single file, typically 100-300 lines, implementing one or two hooks. This modularity is what deepagents and deer-flow inherit and extend. DeepAgents adds <code>FilesystemMiddleware</code> and <code>SubAgentMiddleware</code>. DeerFlow adds 8 more, including <code>SandboxMiddleware</code>, <code>LoopDetectionMiddleware</code>, and <code>DeferredToolFilterMiddleware</code> — each as a composable middleware, not a modification to the agent loop.</p>
+
+<h2>Why this evolution matters</h2>
+
+<p>The AgentExecutor → create_agent transition is not unique to LangChain. It's the same pattern we observed across Course 1: <strong>ad-hoc logic embedded in the loop → explicit, composable interceptors</strong>.</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">Course 1: Implicit</div><div class="fc-desc">claude-code's 12 terminal reasons embedded in queryLoop()</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">Course 1: Explicit</div><div class="fc-desc">deepagents' 11 middleware, each a named class</div></div>
+</div>
+
+<p>LangChain's repo captures the exact same transition within a single codebase. The classic AgentExecutor represents the "implicit" pole — all behavior (retry, summarization, tool execution) is either in the loop or in separate callbacks that can't modify execution. The V1 create_agent represents the "explicit" pole — every behavior is a middleware with a defined interface and composable ordering.</p>
+
+<div class="callout"><strong>Architectural lesson:</strong> Callbacks observe. Middleware participates. If you're building an agent framework today, start with a middleware stack — you can always add callbacks as observers, but retrofitting middleware into a callback-based system requires rewriting the execution loop.</div>
+
+<h2>Exercise</h2>
+
+<div class="quiz" id="quiz1"><h3>Quiz</h3>
+<p style="margin-bottom:0.8rem;">Each question has exactly one correct answer.</p>
+
+<div class="question">Q1. What was the default max iteration limit for AgentExecutor?</div>
+<div class="options">
+  <div class="option" data-q="1" data-a="a">10</div>
+  <div class="option" data-q="1" data-a="b">15</div>
+  <div class="option" data-q="1" data-a="c">25</div>
+  <div class="option" data-q="1" data-a="d">9999</div>
+</div>
+<div class="feedback" id="feedback1"></div>
+
+<div class="question">Q2. How are before/after hooks implemented in create_agent's compiled graph?</div>
+<div class="options">
+  <div class="option" data-q="2" data-a="a">As Python decorators</div>
+  <div class="option" data-q="2" data-a="b">As separate graph nodes</div>
+  <div class="option" data-q="2" data-a="c">As callback registrations</div>
+  <div class="option" data-q="2" data-a="d">As environment variables</div>
+</div>
+<div class="feedback" id="feedback2"></div>
+
+<div class="question">Q3. Which middleware hook would you use to retry on LLM failure?</div>
+<div class="options">
+  <div class="option" data-q="3" data-a="a">before_agent</div>
+  <div class="option" data-q="3" data-a="b">after_model</div>
+  <div class="option" data-q="3" data-a="c">wrap_model_call</div>
+  <div class="option" data-q="3" data-a="d">after_agent</div>
+</div>
+<div class="feedback" id="feedback3"></div>
+
+<div class="question">Q4. What is the fundamental architectural difference between callbacks and middleware?</div>
+<div class="options">
+  <div class="option" data-q="4" data-a="a">Callbacks are async, middleware is sync</div>
+  <div class="option" data-q="4" data-a="b">Callbacks observe, middleware participates</div>
+  <div class="option" data-q="4" data-a="c">Callbacks are deprecated, middleware is new</div>
+  <div class="option" data-q="4" data-a="d">Callbacks use events, middleware uses HTTP</div>
+</div>
+<div class="feedback" id="feedback4"></div>
+</div>
+
+<script>
+(function() {
+  const answers = { 1: 'b', 2: 'b', 3: 'c', 4: 'b' };
+  document.querySelectorAll('.option').forEach(opt => {
+    opt.addEventListener('click', function() {
+      const q = this.dataset.q, a = this.dataset.a;
+      const fb = document.getElementById('feedback' + q);
+      this.parentElement.querySelectorAll('.option').forEach(s => s.classList.remove('correct', 'wrong'));
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        fb.textContent = '✓ Correct.'; fb.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        fb.textContent = '✗ Not quite — re-read the relevant section above.'; fb.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>Primary sources</h2>
+<ol>
+  <li><strong>AgentExecutor</strong>: <a href="https://github.com/langchain-ai/langchain/blob/master/libs/langchain/langchain_classic/agents/agent.py#L1012"><code>agent.py</code> — class (line 1012)</a>, _call() (line 1570)</li>
+  <li><strong>create_agent</strong>: <a href="https://github.com/langchain-ai/langchain/blob/master/libs/langchain_v1/langchain/agents/factory.py#L787"><code>factory.py</code> — create_agent() (line 787)</a></li>
+  <li><strong>AgentMiddleware</strong>: <a href="https://github.com/langchain-ai/langchain/blob/master/libs/langchain_v1/langchain/agents/middleware/types.py#L383"><code>middleware/types.py</code> — class (line 383)</a>, 6 hooks</li>
+  <li><strong>ToolNode</strong>: <a href="https://github.com/langchain-ai/langgraph/blob/main/libs/prebuilt/langgraph/prebuilt/tool_node.py#L622"><code>tool_node.py</code> — ToolNode (line 622)</a></li>
+</ol>
+
+<div class="callout"><strong>Ask followup questions.</strong> If anything is unclear, ask your agent teacher.</div>
+
+<div class="nav">
+  <span><a href="0010-checkpoint-interrupt-streaming.html">&larr; Lesson 0010: Checkpoints</a></span>
+  <span><a href="0012-role-delegation-vs-conversational.html">Lesson 0012: Multi-Agent &rarr;</a></span>
+</div>
+
+<script src="../assets/lang-switcher.js"></script>
+</body>
+</html>

@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0010: Checkpoints, Interrupt/Resume & Streaming</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  :root { --bg: #fffff8; --text: #111; --muted: #666; --accent: #a00; --rule: #ddd; --code-bg: #f4f4f0; --highlight: #fffacd; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 6rem; background: var(--bg); color: var(--text); line-height: 1.5; }
+  h1 { font-size: 2rem; margin-bottom: 0.15rem; }
+  h2 { font-size: 1.35rem; margin: 2.2rem 0 0.6rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  h3 { font-size: 1.08rem; margin: 1.5rem 0 0.5rem; }
+  p { font-size: 0.95rem; margin-bottom: 0.8rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+  li { font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.25rem; }
+  .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; font-style: italic; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; margin-bottom: 0.5rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.85rem; }
+  th, td { padding: 0.45rem 0.55rem; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; background: #f8f8f0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:nth-child(even) td { background: #fafaf6; }
+  code { font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.87rem; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; margin: 0.8rem 0 1.2rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.45; border-left: 3px solid var(--accent); }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid var(--rule); padding-left: 1rem; margin: 1rem 0; color: var(--muted); font-style: italic; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .quiz { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1.5rem 0; }
+  .quiz h3 { margin-top: 0; }
+  .quiz .question { margin: 1rem 0 0.5rem; font-weight: 600; }
+  .quiz .options { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 1rem; }
+  .quiz .option { padding: 0.35rem 0.6rem; cursor: pointer; border: 1px solid var(--rule); background: #fff; font-size: 0.88rem; }
+  .quiz .option:hover { background: var(--highlight); }
+  .quiz .option.correct { background: #d4edda; border-color: #28a745; }
+  .quiz .option.wrong { background: #f8d7da; border-color: #dc3545; }
+  .quiz .feedback { margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.5rem; }
+  .callout { background: #fffacd; border: 1px solid #e6da8a; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="#" data-lang="en">EN</a><span>/</span><a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>Lesson 0010: Checkpoints, Interrupt/Resume &amp; Streaming</h1>
+<p class="subtitle">How LangGraph persists state, enables human-in-the-loop, and streams execution at every granularity.</p>
+<p class="meta">Course 2: Agent Infrastructure · June 2026 · <a href="0010-checkpoint-interrupt-streaming.html">Permalink</a></p>
+
+<p><a href="0009-pregel-execution-model.html">Lesson 0009</a> covered the Pregel execution model — how LangGraph replaces while-loops with graph supersteps. This lesson covers what the runtime does <em>between</em> supersteps: persisting state, pausing for human input, and emitting streaming events. These three capabilities are what make LangGraph more than a graph executor — they make it a production-grade agent runtime.</p>
+
+<h2>Checkpoints: state persistence at every step</h2>
+
+<p>Without checkpointing, a crashed agent loses everything. The user has to restart from the beginning, repeating work and burning tokens. With checkpointing, execution can resume from exactly where it stopped, fork into parallel branches from any point, or time-travel back to a previous state.</p>
+
+<p>LangGraph's checkpoint system is defined at <code>checkpoint/base/__init__.py</code>. The <code>Checkpoint</code> TypedDict at line 92 captures a complete state snapshot:</p>
+
+<pre><code>class Checkpoint(TypedDict):
+    v: int                        # Schema version (currently 4)
+    id: str                       # UUID6 checkpoint ID
+    ts: str                       # ISO timestamp
+    channel_values: dict          # {channel_name: current_value}
+    channel_versions: dict        # {channel_name: version_number}
+    versions_seen: dict           # {node_name: {channel: version}}
+    updated_channels: list[str]   # Channels changed in this step</code></pre>
+
+<p class="sidenote">The <code>versions_seen</code> field is the key to deterministic replay. It records exactly which version of each channel each node consumed. When replaying, the runtime reads the same versions, producing the same outputs.</p>
+
+<p><code>BaseCheckpointSaver</code> at line 176 defines the persistence interface with four methods: <code>get_tuple(config)</code> fetches a checkpoint, <code>put(config, checkpoint, metadata, new_versions)</code> stores one, <code>put_writes(config, writes, task_id)</code> stores intermediate task-level writes, and <code>list(config)</code> enumerates checkpoints for a thread.</p>
+
+<p>Checkpoints are written at three points in the execution lifecycle (<code>pregel/_loop.py</code>): an <strong>input checkpoint</strong> (<code>source="input"</code>) after mapping input to channels, <strong>loop checkpoints</strong> (<code>source="loop"</code>) after each superstep's <code>after_tick()</code>, and <strong>fork checkpoints</strong> (<code>source="fork"</code>) when branching from history.</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">InMemorySaver</div><div class="fc-desc">Dict-based, dev only. No persistence across process restarts.</div></div>
+  <div class="fc-box"><div class="fc-label">SqliteSaver</div><div class="fc-desc">Single-file DB. Good for local production use.</div></div>
+  <div class="fc-box"><div class="fc-label">PostgresSaver</div><div class="fc-desc">Multi-process,高可用. Production scale.</div></div>
+</div>
+
+<p>The durability model supports three modes: <strong>sync</strong> (checkpoint written before next step — safest), <strong>async</strong> (written in background while next step executes — default), and <strong>exit</strong> (written only when the graph exits — used with DeltaChannel for large histories).</p>
+
+<h2>DeltaChannel: O(N²) → O(N)</h2>
+
+<p>A naive checkpoint would serialize the entire message list at every superstep. For a run with N steps, this means O(N²) total storage — a 100-step conversation with 1KB messages would produce ~5MB of checkpoints. <code>DeltaChannel</code> fixes this by only snapshotting every Nth step (default 50) and reconstructing intermediate states via ancestor walk:</p>
+
+<pre><code># DeltaChannel reconstruction (checkpoint/_checkpoint.py:136)
+# To read step 73: walk back to checkpoint at step 50, replay writes 51→73
+# Storage: O(N) instead of O(N²)</code></pre>
+
+<p>This is the mechanism deepagents uses at <code>graph.py:67</code> for its <code>DeepAgentState.messages</code> field. Each superstep writes only the new messages; the DeltaChannel reducer stores the delta and periodically snapshots the full history.</p>
+
+<h2>interrupt(): the pause button</h2>
+
+<p>LangGraph's interrupt mechanism, defined at <code>langgraph/types.py:811</code>, is how human-in-the-loop works. When a node calls <code>interrupt(value)</code>, three things happen:</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">1. Raise GraphInterrupt</div><div class="fc-desc">Execution stops at this node</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">2. Persist checkpoint</div><div class="fc-desc">Current state saved to checkpointer</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">3. Emit interrupt event</div><div class="fc-desc">Client receives the interrupt payload</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">4. Resume with Command</div><div class="fc-desc">graph.invoke(Command(resume=value))</div></div>
+</div>
+
+<p>The <code>Interrupt</code> dataclass at line 533 carries a <code>value</code> (the interrupt payload) and an <code>id</code> (a hash-based unique ID for targeted resumption). The <code>Command</code> dataclass at line 758 provides the resume mechanism: <code>Command(resume=value)</code> answers a pending interrupt, <code>Command(update={...})</code> modifies graph state before resuming, and <code>Command(goto="node_name")</code> jumps to a specific node on resume.</p>
+
+<p>This is the infrastructure beneath two Course 1 patterns: deepagents' <code>HumanInTheLoopMiddleware</code> (which uses <code>interrupt_on</code> config to gate tool calls) and deer-flow's <code>ClarificationMiddleware</code> (which uses <code>Command(goto=END)</code> to intercept clarification requests).</p>
+
+<h2>8 streaming modes: every granularity of observability</h2>
+
+<p>LangGraph supports 8 stream modes (defined at <code>langgraph/types.py:120</code>):</p>
+
+<div class="tbl"><table>
+  <tr><th>Mode</th><th>What you get</th><th>Use case</th></tr>
+  <tr><td><strong>values</strong></td><td>Full state after each superstep</td><td>Sync entire UI state</td></tr>
+  <tr><td><strong>updates</strong></td><td>Only channels that changed</td><td>Efficient incremental sync</td></tr>
+  <tr><td><strong>messages</strong></td><td>Token-by-token LLM output</td><td>Chat-style streaming UI</td></tr>
+  <tr><td><strong>custom</strong></td><td>Arbitrary StreamWriter events</td><td>Progress bars, notifications</td></tr>
+  <tr><td><strong>checkpoints</strong></td><td>Checkpoint metadata after save</td><td>Debug state transitions</td></tr>
+  <tr><td><strong>tasks</strong></td><td>Task lifecycle events</td><td>Monitor parallel execution</td></tr>
+  <tr><td><strong>debug</strong></td><td>All internal events</td><td>Development and tracing</td></tr>
+  <tr><td><strong>tools</strong></td><td>Tool call events</td><td>Stream tool execution progress</td></tr>
+</table></div>
+
+<p>The v3 streaming protocol, <code>GraphRunStream</code> at <code>stream/run_stream.py:31</code>, uses a <code>StreamMux</code> to multiplex events to multiple projections. The <code>StreamTransformer</code> abstraction at <code>stream/_types.py:44</code> enables custom projections — for example, the <code>MessagesTransformer</code> extracts token-by-token deltas from AIMessage chunks for chat UIs.</p>
+
+<p>Deer-flow's <code>worker.py:312</code> uses <code>agent.astream(input, stream_mode=["values", "messages"])</code> — values mode for full state snapshots, messages mode for incremental text. The <code>StreamBridge.publish()</code> method converts each LangGraph stream event into an SSE event for the frontend.</p>
+
+<h2>Exercise: Trace an interrupt cycle</h2>
+
+<div class="quiz" id="quiz1">
+<h3>Quiz</h3>
+<p style="margin-bottom:0.8rem;">Each question has exactly one correct answer.</p>
+
+<div class="question">Q1. What does <code>interrupt()</code> do when called inside a graph node?</div>
+<div class="options">
+  <div class="option" data-q="1" data-a="a">Stops execution permanently</div>
+  <div class="option" data-q="1" data-a="b">Raises GraphInterrupt, persists checkpoint</div>
+  <div class="option" data-q="1" data-a="c">Retries the current node</div>
+  <div class="option" data-q="1" data-a="d">Skips to the next node</div>
+</div>
+<div class="feedback" id="feedback1"></div>
+
+<div class="question">Q2. How does DeltaChannel reduce checkpoint storage growth?</div>
+<div class="options">
+  <div class="option" data-q="2" data-a="a">Compresses data with gzip</div>
+  <div class="option" data-q="2" data-a="b">Snapshots every N steps + replay</div>
+  <div class="option" data-q="2" data-a="c">Deletes old checkpoints</div>
+  <div class="option" data-q="2" data-a="d">Uses external cloud storage</div>
+</div>
+<div class="feedback" id="feedback2"></div>
+
+<div class="question">Q3. Which stream mode gives token-by-token LLM output?</div>
+<div class="options">
+  <div class="option" data-q="3" data-a="a">values</div>
+  <div class="option" data-q="3" data-a="b">updates</div>
+  <div class="option" data-q="3" data-a="c">messages</div>
+  <div class="option" data-q="3" data-a="d">debug</div>
+</div>
+<div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function() {
+  const answers = { 1: 'b', 2: 'b', 3: 'c' };
+  document.querySelectorAll('.option').forEach(opt => {
+    opt.addEventListener('click', function() {
+      const q = this.dataset.q, a = this.dataset.a;
+      const fb = document.getElementById('feedback' + q);
+      this.parentElement.querySelectorAll('.option').forEach(s => s.classList.remove('correct', 'wrong'));
+      if (a === answers[q]) {
+        this.classList.add('correct');
+        fb.textContent = '✓ Correct.'; fb.style.color = '#155724';
+      } else {
+        this.classList.add('wrong');
+        fb.textContent = '✗ Not quite — re-read the relevant section above.'; fb.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>Primary sources</h2>
+<ol>
+  <li><strong>Checkpoint</strong>: <a href="https://github.com/langchain-ai/langgraph/blob/main/libs/checkpoint/langgraph/checkpoint/base/__init__.py#L92"><code>checkpoint/base/__init__.py</code> — Checkpoint TypedDict (line 92)</a>, BaseCheckpointSaver (line 176)</li>
+  <li><strong>interrupt()</strong>: <a href="https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/types.py#L811"><code>langgraph/types.py</code> — interrupt() (line 811)</a>, Command (line 758)</li>
+  <li><strong>Checkpoint lifecycle</strong>: <code>pregel/_checkpoint.py</code> — create_checkpoint() (line 61), channels_from_checkpoint() (line 136)</li>
+  <li><strong>Streaming</strong>: <a href="https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/stream/run_stream.py#L31"><code>stream/run_stream.py</code> — GraphRunStream (line 31)</a></li>
+</ol>
+
+<h2>Recommended next reading</h2>
+<ul>
+  <li>To see checkpointing in action: trace <code>SyncPregelLoop._put_checkpoint()</code> at <code>pregel/_loop.py:1064</code>.</li>
+  <li>To understand interrupt/resume deeply: read <code>_suppress_interrupt()</code> at <code>pregel/_loop.py:1294</code>.</li>
+  <li>Next lesson: <a href="0011-middleware-protocol-evolution.html">Lesson 0011</a> covers the evolution of LangChain's agent system.</li>
+</ul>
+
+<div class="callout"><strong>Ask followup questions.</strong> If anything in this lesson is unclear, ask your agent teacher.</div>
+
+<div class="nav">
+  <span><a href="0009-pregel-execution-model.html">&larr; Lesson 0009: Pregel Model</a></span>
+  <span><a href="0011-middleware-protocol-evolution.html">Lesson 0011: Middleware Evolution &rarr;</a></span>
+</div>
+
+<script src="../assets/lang-switcher.js"></script>
+</body>
+</html>

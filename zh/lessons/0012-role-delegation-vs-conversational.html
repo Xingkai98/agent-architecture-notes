@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第12课：角色委派 vs 会话式编排</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  :root { --bg: #fffff8; --text: #111; --muted: #666; --accent: #a00; --rule: #ddd; --code-bg: #f4f4f0; --highlight: #fffacd; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif; max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 6rem; background: var(--bg); color: var(--text); line-height: 1.5; }
+  h1 { font-size: 2rem; margin-bottom: 0.15rem; } h2 { font-size: 1.35rem; margin: 2.2rem 0 0.6rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; } h3 { font-size: 1.08rem; margin: 1.5rem 0 0.5rem; }
+  p { font-size: 0.95rem; margin-bottom: 0.8rem; } ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; } li { font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.25rem; } .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; font-style: italic; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; margin-bottom: 0.5rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.85rem; } th,td { padding: 0.45rem 0.55rem; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; background: #f8f8f0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; } tr:nth-child(even) td { background: #fafaf6; }
+  code { font-family: "SF Mono","Monaco","Menlo",monospace; font-size: 0.87rem; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; margin: 0.8rem 0 1.2rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.45; border-left: 3px solid var(--accent); } pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid var(--rule); padding-left: 1rem; margin: 1rem 0; color: var(--muted); font-style: italic; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .quiz { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1.5rem 0; } .quiz h3 { margin-top: 0; }
+  .quiz .question { margin: 1rem 0 0.5rem; font-weight: 600; } .quiz .options { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 1rem; }
+  .quiz .option { padding: 0.35rem 0.6rem; cursor: pointer; border: 1px solid var(--rule); background: #fff; font-size: 0.88rem; } .quiz .option:hover { background: var(--highlight); }
+  .quiz .option.correct { background: #d4edda; border-color: #28a745; } .quiz .option.wrong { background: #f8d7da; border-color: #dc3545; }
+  .quiz .feedback { margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.5rem; }
+  .callout { background: #fffacd; border: 1px solid #e6da8a; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav"><a href="../../lessons/0012-role-delegation-vs-conversational.html" data-lang="en">EN</a><span>/</span><a href="#" data-lang="zh">中文</a></nav>
+
+<h1>第12课：角色委派 vs 会话式编排</h1>
+<p class="subtitle">对同一个问题——多个 agent 如何协调——的两种根本不同的答案。</p>
+<p class="meta">课程三：多 Agent 编排 · 2026年6月 · <a href="0012-role-delegation-vs-conversational.html">永久链接</a></p>
+
+<p>课程一和二是关于<strong>单</strong> agent 的。本课问：当你需要<strong>多个</strong> agent 时怎么办？两个框架——CrewAI 和 AutoGen（及其后继 MAF）——给出了截然不同的答案。CrewAI 说："管理者分配工作。"AutoGen 说："agent 彼此对话。"两者都有效。区别在于谁控制工作流。</p>
+
+<p class="sidenote">多 agent 系统解决单 agent 难以应对的三个问题：上下文窗口饱和、工具过载和单点故障。</p>
+
+<h2>范式 A：角色委派（CrewAI）</h2>
+
+<p>CrewAI 将多 agent 协调建模为<strong>管理层级</strong>。一个 <code>Crew</code> 拥有一组 <code>Task</code> 对象和一个 <code>Agent</code> 名单。Crew 根据角色将任务分配给 agent：</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">Crew</div><div class="fc-desc">拥有任务 + agent</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">任务₁：调研</div><div class="fc-desc">分配给 Agent A（角色：研究员）</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">任务₂：撰写</div><div class="fc-desc">分配给 Agent B（角色：写作员），上下文来自任务₁</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">任务₃：审阅</div><div class="fc-desc">分配给 Agent C（角色：审阅员）</div></div>
+</div>
+
+<p><strong>Crew</strong>（<code>crew.py:159</code>）是顶层编排者。两种流程（<code>process.py</code>）：<strong>顺序</strong>（任务按顺序执行）或<strong>层级</strong>（管理者 agent 动态委派任务）。<strong>Task</strong>（<code>task.py:114</code>）有 <code>description</code>、<code>expected_output</code>、指定的 <code>agent</code> 和可选的 <code>context</code>。每个 agent 有自己的内部 ReAct 循环，但<strong>架构重点在 Crew/Task 层，而非单个 agent 循环</strong>。</p>
+
+<h2>范式 B：会话式编排（AutoGen → MAF）</h2>
+
+<p>AutoGen 采用相反的方法：<strong>没有中心管理者</strong>。agent 通过事件驱动运行时通信，<code>GroupChat</code> 管理器选择谁接着发言：</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">Runtime</div><div class="fc-desc">asyncio.Queue 事件循环</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">GroupChat 管理器</div><div class="fc-desc">select_speaker()——RoundRobin / LLM Selector / Swarm</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">Agent 发言</div><div class="fc-desc">将响应发布到群组 topic</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">管理器选择下一位</div><div class="fc-desc">基于对话线程</div></div>
+</div>
+
+<p><code>SingleThreadedAgentRuntime</code>（<code>_single_threaded_agent_runtime.py:149</code>）是一个带有 <code>asyncio.Queue</code> 事件循环的 actor 模型。Agent 通过 <code>send_message()</code>（直接 RPC）和 <code>publish_message()</code>（发布-订阅广播）通信。<code>BaseGroupChat</code>（<code>_base_group_chat.py:40</code>）为每个参与者创建嵌入式运行时并包装在 <code>ChatAgentContainer</code> 中。三种发言者选择策略：RoundRobin、LLM Selector、Swarm。</p>
+
+<h2>AutoGen → MAF：演化故事</h2>
+
+<p>2025 年 10 月，微软宣布 AutoGen 进入<strong>维护模式</strong>。其后继 <strong>Microsoft Agent Framework (MAF)</strong> 融合了 AutoGen 的会话模式与 Semantic Kernel 的企业级基础，并新增了 DAG 工作流。MAF 不仅拥有"agent 对话"，还拥有"图执行"——在单一框架中实现会话和流程两种范式的融合。</p>
+
+<div class="tbl"><table>
+  <tr><th>维度</th><th>CrewAI</th><th>AutoGen</th><th>MAF</th></tr>
+  <tr><td><strong>编排模型</strong></td><td>自上而下（Crew 分配）</td><td>自下而上（agent 对话）</td><td>两者兼有（GroupChat + DAG 工作流）</td></tr>
+  <tr><td><strong>Agent 身份</strong></td><td>角色 + 目标 + 背景故事</td><td>Agent 类型 + 订阅</td><td>Agent 类型 + 技能 + 工作流</td></tr>
+  <tr><td><strong>通信方式</strong></td><td>AgentTools 委派</td><td>send_message / publish_message</td><td>两者 + A2A 协议</td></tr>
+  <tr><td><strong>生产状态</strong></td><td>活跃（~51k stars）</td><td>维护模式（~57k stars）</td><td>活跃（后继产品）</td></tr>
+</table></div>
+
+<div class="callout"><strong>设计启发：</strong>自上而下更便宜也更易调试。自下而上更灵活但更难预测。除非你的用例确实需要涌现式协调，否则选择自上而下。</div>
+
+<h2>练习</h2>
+
+<div class="quiz" id="quiz1"><h3>测验</h3>
+<p style="margin-bottom:0.8rem;">每题只有一个正确答案。</p>
+
+<div class="question">Q1. CrewAI 的层级流程中，谁决定哪个 agent 执行每个任务？</div>
+<div class="options">
+  <div class="option" data-q="1" data-a="a">每个 agent 自愿认领</div><div class="option" data-q="1" data-a="b">管理者 agent 委派</div>
+  <div class="option" data-q="1" data-a="c">轮询</div><div class="option" data-q="1" data-a="d">随机选择</div>
+</div>
+<div class="feedback" id="feedback1"></div>
+
+<div class="question">Q2. AutoGen 中，agent 如何向彼此发送消息？</div>
+<div class="options">
+  <div class="option" data-q="2" data-a="a">直接函数调用</div><div class="option" data-q="2" data-a="b">通过运行时（send/publish）</div>
+  <div class="option" data-q="2" data-a="c">HTTP REST API</div><div class="option" data-q="2" data-a="d">共享内存文件</div>
+</div>
+<div class="feedback" id="feedback2"></div>
+
+<div class="question">Q3. MAF 增加了什么 AutoGen 没有的东西？</div>
+<div class="options">
+  <div class="option" data-q="3" data-a="a">多 agent 对话</div><div class="option" data-q="3" data-a="b">DAG 工作流</div>
+  <div class="option" data-q="3" data-a="c">Python 支持</div><div class="option" data-q="3" data-a="d">发言者选择</div>
+</div>
+<div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function(){const a={1:'b',2:'b',3:'b'};document.querySelectorAll('.option').forEach(o=>{o.addEventListener('click',function(){const q=this.dataset.q,k=this.dataset.a,fb=document.getElementById('feedback'+q);this.parentElement.querySelectorAll('.option').forEach(s=>s.classList.remove('correct','wrong'));if(k===a[q]){this.classList.add('correct');fb.textContent='✓ 正确。';fb.style.color='#155724';}else{this.classList.add('wrong');fb.textContent='✗ 不对。';fb.style.color='#721c24';}});});})();
+</script>
+
+<h2>主要参考来源</h2>
+<ol>
+  <li><strong>CrewAI Crew</strong>：<code>crew.py</code>——Crew 类，第 159 行；_run_sequential_process()，第 1485 行；_run_hierarchical_process()，第 1489 行</li>
+  <li><strong>AutoGen Runtime</strong>：<code>_single_threaded_agent_runtime.py</code>——SingleThreadedAgentRuntime，第 149 行</li>
+  <li><strong>AutoGen GroupChat</strong>：<code>_base_group_chat.py</code>——BaseGroupChat，第 40 行</li>
+</ol>
+
+<div class="callout"><strong>欢迎提出后续问题。</strong></div>
+
+<div class="nav">
+  <span><a href="0011-middleware-protocol-evolution.html">&larr; 第11课：中间件演化</a></span>
+  <span><a href="0013-tool-driven-teams.html">第13课：工具驱动团队 &rarr;</a></span>
+</div>
+
+<script src="../../assets/lang-switcher.js"></script>
+</body>
+</html>

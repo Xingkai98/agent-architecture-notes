@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第9课：Pregel 执行模型 — 图，而非循环</title>
+<link rel="stylesheet" href="../../assets/style.css">
+<style>
+  :root { --bg: #fffff8; --text: #111; --muted: #666; --accent: #a00; --rule: #ddd; --code-bg: #f4f4f0; --highlight: #fffacd; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 6rem; background: var(--bg); color: var(--text); line-height: 1.5; }
+  h1 { font-size: 2rem; margin-bottom: 0.15rem; }
+  h2 { font-size: 1.35rem; margin: 2.2rem 0 0.6rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  h3 { font-size: 1.08rem; margin: 1.5rem 0 0.5rem; }
+  p { font-size: 0.95rem; margin-bottom: 0.8rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+  li { font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.25rem; }
+  .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; font-style: italic; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; margin-bottom: 0.5rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.85rem; }
+  th, td { padding: 0.45rem 0.55rem; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; background: #f8f8f0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:nth-child(even) td { background: #fafaf6; }
+  code { font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.87rem; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; margin: 0.8rem 0 1.2rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.45; border-left: 3px solid var(--accent); }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid var(--rule); padding-left: 1rem; margin: 1rem 0; color: var(--muted); font-style: italic; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .quiz { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1.5rem 0; }
+  .quiz h3 { margin-top: 0; } .quiz .question { margin: 1rem 0 0.5rem; font-weight: 600; }
+  .quiz .options { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 1rem; }
+  .quiz .option { padding: 0.35rem 0.6rem; cursor: pointer; border: 1px solid var(--rule); background: #fff; font-size: 0.88rem; }
+  .quiz .option:hover { background: var(--highlight); }
+  .quiz .option.correct { background: #d4edda; border-color: #28a745; }
+  .quiz .option.wrong { background: #f8d7da; border-color: #dc3545; }
+  .quiz .feedback { margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.5rem; }
+  .callout { background: #fffacd; border: 1px solid #e6da8a; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="../../lessons/0009-pregel-execution-model.html" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>第9课：Pregel 执行模型</h1>
+<p class="subtitle">图，而非循环——LangGraph 如何用声明式状态机替代命令式控制流。</p>
+<p class="meta">课程二：Agent 基础设施 · 2026年6月 · <a href="0009-pregel-execution-model.html">永久链接</a></p>
+
+<p><a href="0001-core-agent-loop.html">课程一</a>中的每个 agent 都围绕一个循环构建。<code>while (should_continue)</code>、<code>for iteration in range(max)</code>、状态机——全是命令式的。本课介绍一种根本不同的方法：<strong>定义图，编译它，让运行时执行它</strong>。</p>
+
+<p class="sidenote">Pregel 是 Google 于 2010 年引入的大规模图处理系统。其核心思想——Bulk Synchronous Parallel（批量同步并行）——自然地映射到 agent 工作流：每个节点是一个计算，边定义依赖关系，在"超级步"之间由屏障同步状态。</p>
+
+<p>LangGraph 的 Pregel 运行时是 <strong>deepagents、deer-flow 和 LangChain 的 create_agent</strong> 底层的执行引擎。当你调用这些框架的 <code>agent.astream()</code> 时，你运行的并非 while 循环——而是每次一个超级步地遍历图。理解这个运行时，就是理解现代 agent 生态系统半数以上运行的"操作系统"。</p>
+
+<h2>从循环到图</h2>
+
+<p>课程一中，我们看到了四种循环架构：</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">A：嵌套双循环</div><div class="fc-desc">pi-mono, openclaw</div></div>
+  <div class="fc-box"><div class="fc-label">B：扁平 While-True</div><div class="fc-desc">claude-code, hermes-agent</div></div>
+  <div class="fc-box"><div class="fc-label">C：状态机</div><div class="fc-desc">nanobot, codex</div></div>
+  <div class="fc-box"><div class="fc-label">D：委托式图</div><div class="fc-desc">deepagents, deer-flow</div></div>
+</div>
+
+<p>架构 D 委托给 LangGraph。那么 LangGraph 实际做了什么？它将 <code>StateGraph</code> 定义编译为 <code>CompiledStateGraph</code>（继承自 <code>Pregel</code>），然后使用批量同步并行模型执行。每次迭代是一个<strong>超级步</strong>，包含三个阶段：</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">1. 规划（Plan）</div><div class="fc-desc">prepare_next_tasks() 根据 channel 版本确定哪些节点被触发</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">2. 执行（Execute）</div><div class="fc-desc">PregelRunner 通过 asyncio.gather 并发运行所有选定节点</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">3. 更新（Update）</div><div class="fc-desc">apply_writes() 将结果提交到 channel，增加版本号</div></div>
+</div>
+
+<p><strong>规划</strong>：<code>prepare_next_tasks()</code> 位于 <code>pregel/_algo.py:392</code>，消费待处理的 <code>Send</code> 任务（PUSH 任务）并检查 <code>trigger_to_nodes</code> 以获取 channel 驱动的触发器（PULL 任务）。对被触发的每个节点，<code>_proc_input()</code> 在第 1348 行根据当前 channel 状态构建该节点的输入。</p>
+
+<p><strong>执行</strong>：<code>PregelRunner</code> 位于 <code>pregel/_runner.py:135</code>，并发运行所有任务。同步循环使用 <code>executor.submit()</code>，异步使用 <code>asyncio.gather()</code>。不共享 channel 依赖的节点并行执行——这就是 BSP 中"批量同步"的含义。</p>
+
+<p><strong>更新</strong>：<code>apply_writes()</code> 位于 <code>pregel/_algo.py:232</code>，按路径排序任务，更新 <code>versions_seen</code>，将写入应用到 channel，增加 channel 版本号，并通知未更改的 channel。每个 channel 都有一个 <strong>reducer</strong>（归并器）来控制并发写入如何合并。</p>
+
+<h2>Channel：状态原语</h2>
+
+<p>在课程一的 agent 循环中，状态是一个可变对象——struct、dict、消息列表。在 LangGraph 中，状态分布在 <strong>channel</strong> 之中。每个 channel 都有一个类型，定义其合并行为：</p>
+
+<div class="tbl"><table>
+  <tr><th>Channel</th><th>Reducer</th><th>用途</th></tr>
+  <tr><td><strong>LastValue</strong></td><td>最后的写入胜出</td><td>系统提示、模型名称、标志位</td></tr>
+  <tr><td><strong>Topic</strong></td><td>追加到列表</td><td>消息历史（配合 add_messages reducer）</td></tr>
+  <tr><td><strong>EphemeralValue</strong></td><td>读取一次后清除</td><td>跳转信号、瞬态标志</td></tr>
+  <tr><td><strong>BinaryOperatorAggregate</strong></td><td>应用二元运算（求和、取最大值等）</td><td>Token 计数器、迭代计数</td></tr>
+  <tr><td><strong>DeltaChannel</strong></td><td>每 N 步快照一次</td><td>大消息历史（O(N²)→O(N) checkpoint）</td></tr>
+</table></div>
+
+<p><code>DeltaChannel</code> 架构上最有趣。朴素的 checkpoint 会在每一步序列化整个消息列表——O(N²) 存储。DeltaChannel 每 50 步才快照一次，并通过向上走回最近的快照并重放写入来重建中间状态。这正是 deepagents 在 <code>graph.py:67</code> 中为 <code>DeepAgentState.messages</code> 使用的机制。</p>
+
+<h2>条件边：图的决策点</h2>
+
+<p><code>StateGraph</code> 分两步构建。首先用 <code>add_node("name", callable)</code>（<code>graph/state.py:662</code>）添加节点。然后连接它们：<code>add_edge("a", "b")</code> 用于无条件转换，<code>add_conditional_edges("a", branch_fn, path_map)</code>（第 969 行）用于分支。条件边是 LangGraph"图即程序"性质显现的地方。<code>branch_fn</code> 接收当前状态并返回一个字符串——下一个要执行的节点。这就是标准 agent 图的工作原理：</p>
+
+<pre><code># 每个基于 LangGraph 的 agent（deepagents、deer-flow、LangChain create_agent）
+# 都编译成这个拓扑结构：
+
+StateGraph(AgentState)
+  .add_node("model", call_llm)         # 思考
+  .add_node("tools", ToolNode(tools))  # 行动
+  .add_edge(START, "model")
+  .add_conditional_edges(
+      "model",
+      lambda state: "tools" if state["messages"][-1].tool_calls else END,
+      {"tools": "tools", END: END}
+  )
+  .add_edge("tools", "model")          # 观察 → 回到思考
+  .compile()</code></pre>
+
+<p><code>compile()</code> 方法位于 <code>graph/state.py:1164</code>，验证图、解析 channel，将每个节点包装为 <code>PregelNode</code>（带有 channel 读/写器），并返回 <code>CompiledStateGraph</code>。此后 <code>invoke()</code> / <code>stream()</code> / <code>astream()</code> 都通过 Pregel 循环，提供三项命令式循环没有的能力：独立分支的免费并行、确定性重放和无需手写保存/恢复逻辑的框架级持久化。代价是不透明——调试需要理解 channel 版本系统和触发图。</p>
+
+<div class="callout"><strong>设计启发：</strong>如果你的 agent 有复杂的条件分支或超过三个工具，图模型通过 channel/reducer 模式所防止的 bug，比它在调试中增加的复杂度要多。简单线性循环则用 while 循环更直接。</div>
+
+<h2>练习：追踪一个超级步</h2>
+
+<div class="quiz" id="quiz1"><h3>测验</h3>
+<p style="margin-bottom:0.8rem;">每题只有一个正确答案。</p>
+
+<div class="question">Q1. LangGraph 用什么执行模型替代了 while 循环？</div>
+<div class="options">
+  <div class="option" data-q="1" data-a="a">事件循环</div>
+  <div class="option" data-q="1" data-a="b">Pregel/BSP</div>
+  <div class="option" data-q="1" data-a="c">Actor 模型</div>
+  <div class="option" data-q="1" data-a="d">协程链</div>
+</div>
+<div class="feedback" id="feedback1"></div>
+
+<div class="question">Q2. 在 Pregel 超级步的"规划"阶段发生了什么？</div>
+<div class="options">
+  <div class="option" data-q="2" data-a="a">所有节点执行</div>
+  <div class="option" data-q="2" data-a="b">写入被应用</div>
+  <div class="option" data-q="2" data-a="c">确定哪些节点需要触发</div>
+  <div class="option" data-q="2" data-a="d">清空 channel</div>
+</div>
+<div class="feedback" id="feedback2"></div>
+
+<div class="question">Q3. 哪个 channel 类型适合只能增加的 token 计数器？</div>
+<div class="options">
+  <div class="option" data-q="3" data-a="a">LastValue</div>
+  <div class="option" data-q="3" data-a="b">Topic</div>
+  <div class="option" data-q="3" data-a="c">EphemeralValue</div>
+  <div class="option" data-q="3" data-a="d">BinaryOperatorAggregate</div>
+</div>
+<div class="feedback" id="feedback3"></div>
+
+<div class="question">Q4. DeltaChannel 如何降低 checkpoint 存储增长？</div>
+<div class="options">
+  <div class="option" data-q="4" data-a="a">压缩 checkpoint</div>
+  <div class="option" data-q="4" data-a="b">每 N 步快照 + 重放</div>
+  <div class="option" data-q="4" data-a="c">只存储首尾</div>
+  <div class="option" data-q="4" data-a="d">使用外部云存储</div>
+</div>
+<div class="feedback" id="feedback4"></div>
+</div>
+
+<script>
+(function() { const ans={1:'b',2:'c',3:'d',4:'b'}; document.querySelectorAll('.option').forEach(o=>{ o.addEventListener('click',function(){ const q=this.dataset.q,a=this.dataset.a,fb=document.getElementById('feedback'+q); this.parentElement.querySelectorAll('.option').forEach(s=>s.classList.remove('correct','wrong')); if(a===ans[q]){this.classList.add('correct');fb.textContent='✓ 正确。';fb.style.color='#155724';}else{this.classList.add('wrong');fb.textContent='✗ 不对——请重读上面相关内容。';fb.style.color='#721c24';}});}); })();
+</script>
+
+<h2>主要参考来源</h2>
+<ol>
+  <li><strong>Pregel 类</strong>：<a href="https://github.com/langchain-ai/langgraph/blob/main/libs/langgraph/langgraph/pregel/main.py#L449"><code>pregel/main.py</code>——Pregel 类（第 449 行）</a></li>
+  <li><strong>执行循环</strong>：<code>pregel/_loop.py</code>——tick()（第 592 行），after_tick()（第 676 行）</li>
+  <li><strong>任务调度</strong>：<code>pregel/_algo.py</code>——prepare_next_tasks()（第 392 行），apply_writes()（第 232 行）</li>
+  <li><strong>StateGraph</strong>：<code>graph/state.py</code>——StateGraph（第 130 行），compile()（第 1164 行）</li>
+</ol>
+
+<div class="callout"><strong>欢迎提出后续问题。</strong>如果本课有任何不清楚的地方，或者你想追踪 Pregel 源码中的特定执行路径，请向你的 agent 老师提问。</div>
+
+<div class="nav">
+  <span><a href="0008-error-recovery.html">&larr; 第8课：错误恢复</a></span>
+  <span><a href="0010-checkpoint-interrupt-streaming.html">第10课：Checkpoint 与中断 &rarr;</a></span>
+</div>
+
+<script src="../../assets/lang-switcher.js"></script>
+</body>
+</html>

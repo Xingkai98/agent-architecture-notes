@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0012: Role Delegation vs Conversational Orchestration</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  :root { --bg: #fffff8; --text: #111; --muted: #666; --accent: #a00; --rule: #ddd; --code-bg: #f4f4f0; --highlight: #fffacd; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 6rem; background: var(--bg); color: var(--text); line-height: 1.5; }
+  h1 { font-size: 2rem; margin-bottom: 0.15rem; }
+  h2 { font-size: 1.35rem; margin: 2.2rem 0 0.6rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  h3 { font-size: 1.08rem; margin: 1.5rem 0 0.5rem; }
+  p { font-size: 0.95rem; margin-bottom: 0.8rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; } li { font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.25rem; }
+  .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; font-style: italic; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; margin-bottom: 0.5rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.85rem; }
+  th, td { padding: 0.45rem 0.55rem; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; background: #f8f8f0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:nth-child(even) td { background: #fafaf6; }
+  code { font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.87rem; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; margin: 0.8rem 0 1.2rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.45; border-left: 3px solid var(--accent); }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid var(--rule); padding-left: 1rem; margin: 1rem 0; color: var(--muted); font-style: italic; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .quiz { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1.5rem 0; } .quiz h3 { margin-top: 0; }
+  .quiz .question { margin: 1rem 0 0.5rem; font-weight: 600; }
+  .quiz .options { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 1rem; }
+  .quiz .option { padding: 0.35rem 0.6rem; cursor: pointer; border: 1px solid var(--rule); background: #fff; font-size: 0.88rem; }
+  .quiz .option:hover { background: var(--highlight); }
+  .quiz .option.correct { background: #d4edda; border-color: #28a745; }
+  .quiz .option.wrong { background: #f8d7da; border-color: #dc3545; }
+  .quiz .feedback { margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.5rem; }
+  .callout { background: #fffacd; border: 1px solid #e6da8a; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav"><a href="#" data-lang="en">EN</a><span>/</span><a href="#" data-lang="zh">中文</a></nav>
+
+<h1>Lesson 0012: Role Delegation vs Conversational Orchestration</h1>
+<p class="subtitle">Two fundamentally different answers to the same question: how should multiple agents coordinate?</p>
+<p class="meta">Course 3: Multi-Agent Orchestration · June 2026 · <a href="0012-role-delegation-vs-conversational.html">Permalink</a></p>
+
+<p>Courses 1 and 2 were about <strong>single</strong> agents — one LLM, one loop, one tool set. This lesson asks: what happens when you have <strong>multiple</strong> agents? Two frameworks — CrewAI and AutoGen (with its successor MAF) — give radically different answers. CrewAI says: "a manager assigns work." AutoGen says: "agents talk to each other." Both work. The difference is in who controls the workflow.</p>
+
+<p class="sidenote">Multi-agent systems solve three problems that single agents struggle with: context window saturation (each agent has its own window), tool overload (each agent has a focused tool set), and single-point-of-failure (one agent's error doesn't kill the whole system).</p>
+
+<h2>Paradigm A: Role Delegation (CrewAI)</h2>
+
+<p>CrewAI models multi-agent coordination as a <strong>management hierarchy</strong>. A <code>Crew</code> owns a set of <code>Task</code> objects and a roster of <code>Agent</code> objects. The Crew assigns tasks to agents based on their roles:</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">Crew</div><div class="fc-desc">Owns tasks + agents</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">Task₁: Research</div><div class="fc-desc">Assigned to Agent A (role: researcher)</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">Task₂: Write</div><div class="fc-desc">Assigned to Agent B (role: writer), context from Task₁</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">Task₃: Review</div><div class="fc-desc">Assigned to Agent C (role: reviewer)</div></div>
+</div>
+
+<p><strong>The Crew</strong> at <code>crew.py:159</code> is the top-level orchestrator. It runs in one of two <strong>processes</strong> (<code>process.py</code>): <strong>sequential</strong> (tasks execute in order, each agent completes its task before the next begins) or <strong>hierarchical</strong> (a manager agent — either auto-created from <code>manager_llm</code> or explicitly provided as <code>manager_agent</code> — delegates tasks dynamically).</p>
+
+<p><strong>Tasks</strong> at <code>task.py:114</code> are the unit of work. Each task has a <code>description</code>, an <code>expected_output</code>, an assigned <code>agent</code>, optional <code>context</code> from previous tasks (enabling task chaining), and optional <code>async_execution</code> for background tasks.</p>
+
+<p><strong>Agents</strong> at <code>agent/core.py:171</code> are defined by <code>role</code>, <code>goal</code>, and <code>backstory</code> — a narrative-driven identity model. Each agent has its own internal ReAct loop (the <code>CrewAgentExecutor</code> at <code>crew_agent_executor.py</code>), but the <strong>architectural focus is on the Crew/Task layer, not the individual agent loop</strong>. Agents can delegate to each other via <code>AgentTools</code> (<code>DelegateWorkTool</code>, <code>AskQuestionTool</code>) at <code>tools/agent_tools/agent_tools.py</code>.</p>
+
+<h2>Paradigm B: Conversational Orchestration (AutoGen → MAF)</h2>
+
+<p>AutoGen takes the opposite approach: <strong>no central manager</strong>. Agents communicate through an event-driven runtime, and a <code>GroupChat</code> manager selects who speaks next. The workflow emerges from conversation, not from assignment:</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">Runtime</div><div class="fc-desc">asyncio.Queue event loop</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">GroupChat Manager</div><div class="fc-desc">select_speaker() — RoundRobin / LLM Selector / Swarm</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">Agent speaks</div><div class="fc-desc">publishes response to group topic</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">Manager selects next</div><div class="fc-desc">Based on conversation thread</div></div>
+</div>
+
+<p><strong>The Runtime</strong>: <code>SingleThreadedAgentRuntime</code> at <code>autogen_core/_single_threaded_agent_runtime.py:149</code> is an actor model with an <code>asyncio.Queue</code> event loop. Agents communicate via two primitives: <code>send_message()</code> (direct RPC to a specific <code>AgentId</code>) and <code>publish_message()</code> (pub-sub broadcast to a <code>TopicId</code>). Agents never call each other directly — all communication flows through the runtime.</p>
+
+<p><strong>GroupChat</strong>: <code>BaseGroupChat</code> at <code>_base_group_chat.py:40</code> creates an embedded runtime and wraps each participant in a <code>ChatAgentContainer</code>. The <code>BaseGroupChatManager</code> at <code>_base_group_chat_manager.py:25</code> orchestrates via <strong>speaker selection</strong>: <code>select_speaker(thread)</code> at line 306. Three strategies: <code>RoundRobinGroupChat</code> (cycles through participants), <code>SelectorGroupChat</code> (LLM chooses the next speaker based on conversation context), and <code>SwarmGroupChat</code> (handoff-based agent routing).</p>
+
+<h2>AutoGen → MAF: the evolution story</h2>
+
+<p>In October 2025, Microsoft announced AutoGen was entering <strong>maintenance mode</strong>. Its successor, <strong>Microsoft Agent Framework (MAF)</strong>, merges AutoGen's conversational patterns with Semantic Kernel's enterprise foundation. This is not a rewrite — MAF is a new codebase that inherits architectural ideas from both parents:</p>
+
+<div class="tbl"><table>
+  <tr><th>Inherited from</th><th>What</th></tr>
+  <tr><td><strong>AutoGen</strong></td><td>Conversational multi-agent patterns, GroupChat, event-driven runtime, pub-sub messaging</td></tr>
+  <tr><td><strong>Semantic Kernel</strong></td><td>Enterprise middleware (filtering, logging, auth), type-safe .NET + Python parity, OpenTelemetry</td></tr>
+  <tr><td><strong>New in MAF</strong></td><td>DAG-based Workflow/WorkflowExecutor, EdgeRunner (sequential, fan-out/in, switch-case), Skills system, A2A interoperability</td></tr>
+</table></div>
+
+<p>The key architectural addition in MAF is <strong>Workflows</strong>: deterministic DAG-based execution alongside conversational GroupChat. Where AutoGen only had "agents talking," MAF also has "graphs executing" — a convergence of the conversational and workflow paradigms into a single framework.</p>
+
+<h2>Comparative table</h2>
+
+<div class="tbl"><table>
+  <tr><th>Dimension</th><th>CrewAI</th><th>AutoGen</th><th>MAF</th></tr>
+  <tr><td><strong>Orchestration model</strong></td><td>Top-down (Crew assigns)</td><td>Bottom-up (agents converse)</td><td>Both (GroupChat + DAG workflows)</td></tr>
+  <tr><td><strong>Agent identity</strong></td><td>Role + Goal + Backstory</td><td>Agent type + subscriptions</td><td>Agent type + skills + workflows</td></tr>
+  <tr><td><strong>Communication</strong></td><td>AgentTools delegation</td><td>send_message / publish_message</td><td>Both + A2A protocol</td></tr>
+  <tr><td><strong>Workflow control</strong></td><td>Sequential or hierarchical process</td><td>Speaker selection (RoundRobin/Selector/Swarm)</td><td>DAG EdgeRunner + GroupChat</td></tr>
+  <tr><td><strong>State management</strong></td><td>Task context chain</td><td>Checkpoint via runtime</td><td>Checkpoint + workflow state</td></tr>
+  <tr><td><strong>Production status</strong></td><td>Active (~51k stars)</td><td>Maintenance mode (~57k stars)</td><td>Active (successor)</td></tr>
+</table></div>
+
+<h2>When to use which</h2>
+
+<p><strong>Role delegation (CrewAI)</strong> when the workflow is known in advance — report generation, content pipelines, multi-step analysis where each step has a clear owner. The top-down model gives you predictable, auditable execution.</p>
+
+<p><strong>Conversational (AutoGen/MAF)</strong> when the workflow emerges from interaction — collaborative problem-solving, negotiation, debate between perspectives. The bottom-up model handles unexpected directions better because no manager pre-commits to a task sequence.</p>
+
+<p><strong>MAF specifically</strong> when you need both: deterministic DAGs for the known parts of your workflow, conversational GroupChat for the parts that require agent discretion. This hybrid is the most architecturally interesting — and the most complex to reason about.</p>
+
+<div class="callout"><strong>Design heuristic:</strong> Top-down is cheaper to build and easier to debug. Bottom-up is more flexible but harder to predict. Choose top-down unless your use case genuinely requires emergent coordination.</div>
+
+<h2>Exercise</h2>
+
+<div class="quiz" id="quiz1"><h3>Quiz</h3>
+<p style="margin-bottom:0.8rem;">Each question has exactly one correct answer.</p>
+
+<div class="question">Q1. In CrewAI's hierarchical process, who decides which agent executes each task?</div>
+<div class="options">
+  <div class="option" data-q="1" data-a="a">Each agent volunteers</div>
+  <div class="option" data-q="1" data-a="b">A manager agent delegates</div>
+  <div class="option" data-q="1" data-a="c">Round-robin rotation</div>
+  <div class="option" data-q="1" data-a="d">Random selection</div>
+</div>
+<div class="feedback" id="feedback1"></div>
+
+<div class="question">Q2. In AutoGen, how do agents send messages to each other?</div>
+<div class="options">
+  <div class="option" data-q="2" data-a="a">Direct function calls</div>
+  <div class="option" data-q="2" data-a="b">Through the runtime (send/publish)</div>
+  <div class="option" data-q="2" data-a="c">HTTP REST API</div>
+  <div class="option" data-q="2" data-a="d">Shared memory files</div>
+</div>
+<div class="feedback" id="feedback2"></div>
+
+<div class="question">Q3. What does MAF add that AutoGen lacked?</div>
+<div class="options">
+  <div class="option" data-q="3" data-a="a">Multi-agent conversations</div>
+  <div class="option" data-q="3" data-a="b">DAG-based workflows</div>
+  <div class="option" data-q="3" data-a="c">Python support</div>
+  <div class="option" data-q="3" data-a="d">Speaker selection</div>
+</div>
+<div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function() {
+  const answers = { 1: 'b', 2: 'b', 3: 'b' };
+  document.querySelectorAll('.option').forEach(opt => {
+    opt.addEventListener('click', function() {
+      const q = this.dataset.q, a = this.dataset.a;
+      const fb = document.getElementById('feedback' + q);
+      this.parentElement.querySelectorAll('.option').forEach(s => s.classList.remove('correct', 'wrong'));
+      if (a === answers[q]) {
+        this.classList.add('correct'); fb.textContent = '✓ Correct.'; fb.style.color = '#155724';
+      } else {
+        this.classList.add('wrong'); fb.textContent = '✗ Not quite.'; fb.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>Primary sources</h2>
+<ol>
+  <li><strong>CrewAI Crew</strong>: <code>lib/crewai/src/crewai/crew.py</code> — Crew class, line 159; _run_sequential_process(), line 1485; _run_hierarchical_process(), line 1489</li>
+  <li><strong>CrewAI Task</strong>: <code>lib/crewai/src/crewai/task.py</code> — Task class, line 114</li>
+  <li><strong>AutoGen Runtime</strong>: <code>autogen_core/_single_threaded_agent_runtime.py</code> — SingleThreadedAgentRuntime, line 149</li>
+  <li><strong>AutoGen GroupChat</strong>: <code>autogen_agentchat/teams/_group_chat/_base_group_chat.py</code> — BaseGroupChat, line 40</li>
+</ol>
+
+<div class="callout"><strong>Ask followup questions.</strong> If anything is unclear, ask your agent teacher.</div>
+
+<div class="nav">
+  <span><a href="0011-middleware-protocol-evolution.html">&larr; Lesson 0011: Middleware Evolution</a></span>
+  <span><a href="0013-tool-driven-teams.html">Lesson 0013: Tool-Driven Teams &rarr;</a></span>
+</div>
+
+<script src="../assets/lang-switcher.js"></script>
+</body>
+</html>

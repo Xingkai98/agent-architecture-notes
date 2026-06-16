@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0013: Tool-Driven Teams — AgentScope</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  :root { --bg: #fffff8; --text: #111; --muted: #666; --accent: #a00; --rule: #ddd; --code-bg: #f4f4f0; --highlight: #fffacd; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif; max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 6rem; background: var(--bg); color: var(--text); line-height: 1.5; }
+  h1 { font-size: 2rem; margin-bottom: 0.15rem; }
+  h2 { font-size: 1.35rem; margin: 2.2rem 0 0.6rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  h3 { font-size: 1.08rem; margin: 1.5rem 0 0.5rem; }
+  p { font-size: 0.95rem; margin-bottom: 0.8rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; } li { font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 0.25rem; }
+  .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; font-style: italic; }
+  .sidenote { float: right; clear: right; width: 180px; margin-right: -210px; font-size: 0.8rem; color: var(--muted); line-height: 1.3; margin-bottom: 0.5rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.85rem; }
+  th, td { padding: 0.45rem 0.55rem; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 600; background: #f8f8f0; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:nth-child(even) td { background: #fafaf6; }
+  code { font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.87rem; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; margin: 0.8rem 0 1.2rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.45; border-left: 3px solid var(--accent); }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid var(--rule); padding-left: 1rem; margin: 1rem 0; color: var(--muted); font-style: italic; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .quiz { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1.5rem 0; } .quiz h3 { margin-top: 0; }
+  .quiz .question { margin: 1rem 0 0.5rem; font-weight: 600; }
+  .quiz .options { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 1rem; }
+  .quiz .option { padding: 0.35rem 0.6rem; cursor: pointer; border: 1px solid var(--rule); background: #fff; font-size: 0.88rem; }
+  .quiz .option:hover { background: var(--highlight); }
+  .quiz .option.correct { background: #d4edda; border-color: #28a745; }
+  .quiz .option.wrong { background: #f8d7da; border-color: #dc3545; }
+  .quiz .feedback { margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.5rem; }
+  .callout { background: #fffacd; border: 1px solid #e6da8a; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav"><a href="#" data-lang="en">EN</a><span>/</span><a href="#" data-lang="zh">中文</a></nav>
+
+<h1>Lesson 0013: Tool-Driven Teams — AgentScope</h1>
+<p class="subtitle">When team management is just another tool call — AgentScope's metacognitive approach to multi-agent coordination.</p>
+<p class="meta">Course 3: Multi-Agent Orchestration · June 2026 · <a href="0013-tool-driven-teams.html">Permalink</a></p>
+
+<p><a href="0012-role-delegation-vs-conversational.html">Lesson 0012</a> covered two approaches to multi-agent coordination: CrewAI's top-down role delegation and AutoGen/MAF's bottom-up conversation. AgentScope (Alibaba, ~23k stars) introduces a <strong>third paradigm</strong>: team management as agent tools. The leader agent creates, communicates with, and destroys team members using the same tool-calling interface it uses for file operations and web searches. This is a metacognitive approach — the agent <em>reasons about team structure</em> the same way it reasons about any other task.</p>
+
+<p class="sidenote">AgentScope is also unique among the three multi-agent frameworks in being a full single-agent harness — its <code>Agent</code> class has a complete ReAct loop with middleware, Toolkit/ToolGroup, and Workspace isolation. It can function as a standalone agent or recursively spawn itself into a multi-agent system.</p>
+
+<h2>Teams as tools: the core insight</h2>
+
+<p>In CrewAI, team management is a separate orchestration layer (the <code>Crew</code> class). In AutoGen, it's a separate runtime (the <code>GroupChat</code>). In AgentScope, <strong>it's just tools</strong>:</p>
+
+<div class="flowchart">
+  <div class="fc-box"><div class="fc-label">TeamCreate</div><div class="fc-desc">Establish a team with caller as leader</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">AgentCreate</div><div class="fc-desc">Spawn worker with session, toolkit, workspace</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">TeamSay</div><div class="fc-desc">Send messages via MessageBus</div></div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box"><div class="fc-label">TeamDelete</div><div class="fc-desc">Dissolve the team</div></div>
+</div>
+
+<p><strong>TeamCreate</strong> at <code>_tools/_team_create.py:30</code> creates a persistent team record. The calling agent becomes the leader. Workers are spawned by subsequent <code>AgentCreate</code> calls.</p>
+
+<p><strong>AgentCreate</strong> at <code>_tools/_agent_create.py:136</code> spawns a worker agent with its own session, toolkit, permission context, workspace, and <code>SubAgentTemplate</code> (a reusable blueprint at <code>_types.py:29</code> with type, description, system_prompt_template, context_config, react_config). The leader assigns work through the <code>prompt</code> parameter — not through a task list or conversation thread, but as a parameter to the tool call that creates the worker.</p>
+
+<p><strong>TeamSay</strong> at <code>_tools/_team_say.py:74</code> sends a <code>HintBlock</code> to a specific member or broadcasts to all members. Messages flow through the <strong>MessageBus</strong>, not direct agent-to-agent calls.</p>
+
+<p>This inverts the control model: instead of a framework managing agents, <strong>the agent manages its own team through tools</strong>. The leader can decide at runtime how many workers to spawn, what roles they should have, and when to communicate with them — the same kind of decision-making it applies to reading files or searching the web.</p>
+
+<h2>MessageBus: the communication fabric</h2>
+
+<p>The <code>MessageBus</code> at <code>message_bus/_base.py:49</code> provides three transport modes:</p>
+
+<div class="tbl"><table>
+  <tr><th>Mode</th><th>Pattern</th><th>Use case</th></tr>
+  <tr><td><strong>Drain queue</strong></td><td>Single-consumer, ack-on-read</td><td>Per-session inboxes for agent messages</td></tr>
+  <tr><td><strong>Replay log</strong></td><td>Multi-consumer, cursor-tracked</td><td>SSE event replay for frontend streaming</td></tr>
+  <tr><td><strong>Transient broadcast</strong></td><td>Fire-and-forget pub/sub</td><td>Wake-up signals, status notifications</td></tr>
+</table></div>
+
+<p>The <code>InboxMiddleware</code> at <code>app/middleware/_inbox_middleware.py:24</code> drains the session's inbox before each reasoning step, injecting <code>HintBlock</code> objects (team messages, tool offload results) into the agent's context. This means agent-to-agent communication is asynchronous — the leader sends a message, and the worker picks it up on its next reasoning cycle.</p>
+
+<h2>The AgentScope hybrid: single-agent harness meets multi-agent platform</h2>
+
+<p>Unlike CrewAI and AutoGen which are purely multi-agent frameworks, AgentScope is a <strong>complete single-agent harness</strong> that can scale to multi-agent:</p>
+
+<ul>
+  <li><strong>Agent class</strong> at <code>_agent.py:94</code> — full ReAct loop (<code>_reply_impl()</code> at line 542), reasoning phase (<code>_reasoning_impl()</code> at line 755), tool batching (<code>_batch_tool_calls()</code> at line 1102)</li>
+  <li><strong>Toolkit/ToolGroup</strong> at <code>tool/_toolkit.py:66</code> — group-based tool activation/deactivation, MCP integration, skill loading</li>
+  <li><strong>Workspace</strong> at <code>workspace/_base.py:36</code> — Local, Docker, and E2B sandbox isolation with lifecycle management</li>
+  <li><strong>ChatService</strong> at <code>app/_service/_chat.py:46</code> — the harness entry point that assembles agent, toolkit, middleware, and workspace</li>
+</ul>
+
+<p>When a leader calls <code>AgentCreate</code>, it spawns another instance of this entire harness — new session, new workspace, new toolkit — running independently. The leader communicates through the MessageBus, not through shared memory. Each worker is a full agent, not a lightweight stub.</p>
+
+<h2>Three paradigms compared</h2>
+
+<div class="tbl"><table>
+  <tr><th>Dimension</th><th>CrewAI</th><th>AutoGen/MAF</th><th>AgentScope</th></tr>
+  <tr><td><strong>Coordination</strong></td><td>Role delegation</td><td>Conversation</td><td>Tool invocation</td></tr>
+  <tr><td><strong>Control flow</strong></td><td>Top-down (Crew)</td><td>Bottom-up (GroupChat)</td><td>Metacognitive (agent decides)</td></tr>
+  <tr><td><strong>Agent identity</strong></td><td>Role + Goal + Backstory</td><td>Agent type + subscriptions</td><td>Session + SubAgentTemplate</td></tr>
+  <tr><td><strong>Communication</strong></td><td>AgentTools delegation</td><td>pub/sub via runtime</td><td>MessageBus (3 modes)</td></tr>
+  <tr><td><strong>Single-agent capable</strong></td><td>Yes (basic ReAct)</td><td>Yes (AssistantAgent)</td><td><strong>Yes (full harness)</strong></td></tr>
+  <tr><td><strong>Worker isolation</strong></td><td>Shared memory</td><td>Runtime-scoped</td><td><strong>Session + Workspace</strong></td></tr>
+  <tr><td><strong>Unique contribution</strong></td><td>Memory (RecallFlow)</td><td>Actor runtime</td><td>Teams-as-tools</td></tr>
+</table></div>
+
+<h2>When to use AgentScope's approach</h2>
+
+<p>The tool-driven model is ideal when the <strong>agent should decide its own team structure</strong>. If you don't know in advance how many workers you'll need or what roles they should have — let the leader agent figure it out at runtime. This is metacognition: the agent reasons about <em>how to organize work</em>, not just how to do it.</p>
+
+<p>The cost is opacity: tool-driven team creation is harder to debug than a predefined Crew or GroupChat because the team structure is not visible in the code — it emerges from the leader's tool calls.</p>
+
+<div class="callout"><strong>Design heuristic:</strong> When team structure is known, use CrewAI (simpler). When it emerges from conversation, use AutoGen/MAF. When the agent should figure out its own team, use AgentScope. The metacognitive model is the most powerful — and the hardest to predict.</div>
+
+<h2>Exercise</h2>
+
+<div class="quiz" id="quiz1"><h3>Quiz</h3>
+<p style="margin-bottom:0.8rem;">Each question has exactly one correct answer.</p>
+
+<div class="question">Q1. What makes AgentScope's multi-agent approach unique?</div>
+<div class="options">
+  <div class="option" data-q="1" data-a="a">Uses HTTP for communication</div>
+  <div class="option" data-q="1" data-a="b">Team management is agent tools</div>
+  <div class="option" data-q="1" data-a="c">Only supports Python</div>
+  <div class="option" data-q="1" data-a="d">Requires Docker</div>
+</div>
+<div class="feedback" id="feedback1"></div>
+
+<div class="question">Q2. Which MessageBus mode is used for SSE event replay?</div>
+<div class="options">
+  <div class="option" data-q="2" data-a="a">Drain queue</div>
+  <div class="option" data-q="2" data-a="b">Replay log</div>
+  <div class="option" data-q="2" data-a="c">Transient broadcast</div>
+  <div class="option" data-q="2" data-a="d">WebSocket</div>
+</div>
+<div class="feedback" id="feedback2"></div>
+
+<div class="question">Q3. How does a leader assign work to a spawned worker in AgentScope?</div>
+<div class="options">
+  <div class="option" data-q="3" data-a="a">Through a Crew task list</div>
+  <div class="option" data-q="3" data-a="b">Through GroupChat speaker selection</div>
+  <div class="option" data-q="3" data-a="c">Through the prompt parameter of AgentCreate</div>
+  <div class="option" data-q="3" data-a="d">Through a REST API</div>
+</div>
+<div class="feedback" id="feedback3"></div>
+</div>
+
+<script>
+(function() {
+  const answers = { 1: 'b', 2: 'b', 3: 'c' };
+  document.querySelectorAll('.option').forEach(opt => {
+    opt.addEventListener('click', function() {
+      const q = this.dataset.q, a = this.dataset.a;
+      const fb = document.getElementById('feedback' + q);
+      this.parentElement.querySelectorAll('.option').forEach(s => s.classList.remove('correct', 'wrong'));
+      if (a === answers[q]) {
+        this.classList.add('correct'); fb.textContent = '✓ Correct.'; fb.style.color = '#155724';
+      } else {
+        this.classList.add('wrong'); fb.textContent = '✗ Not quite.'; fb.style.color = '#721c24';
+      }
+    });
+  });
+})();
+</script>
+
+<h2>Primary sources</h2>
+<ol>
+  <li><strong>AgentScope Agent</strong>: <code>src/agentscope/agent/_agent.py</code> — Agent class, line 94; _reply_impl(), line 542</li>
+  <li><strong>TeamCreate</strong>: <code>src/agentscope/app/_tools/_team_create.py</code> — TeamCreate, line 30</li>
+  <li><strong>AgentCreate</strong>: <code>src/agentscope/app/_tools/_agent_create.py</code> — AgentCreate, line 136</li>
+  <li><strong>MessageBus</strong>: <code>src/agentscope/app/message_bus/_base.py</code> — MessageBus, line 49</li>
+  <li><strong>Workspace</strong>: <code>src/agentscope/workspace/_base.py</code> — WorkspaceBase, line 36</li>
+</ol>
+
+<div class="callout"><strong>Ask followup questions.</strong> This concludes Course 3. If anything is unclear, or you want to explore a specific framework in more depth, ask your agent teacher.</div>
+
+<div class="nav">
+  <span><a href="0012-role-delegation-vs-conversational.html">&larr; Lesson 0012: Role vs Conversational</a></span>
+  <span><a href="../reference/agent-harness-dimensions.html">Reference: Architectural Dimensions &rarr;</a></span>
+</div>
+
+<script src="../assets/lang-switcher.js"></script>
+</body>
+</html>
