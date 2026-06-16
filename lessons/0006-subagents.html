@@ -11,6 +11,8 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #6f42c1, #0366d6, #28a745, #dc3545); border-radius: 3px; }
+  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
+  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -158,14 +160,14 @@ def delegate_task(
 
 <p>At <code>codex-rs/core/src/tools/handlers/multi_agents_v2.rs</code>, five tools form the complete lifecycle:</p>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Tool</th><th>Purpose</th></tr>
   <tr><td><code>spawn_agent</code></td><td>Create a new sub-agent with a task description</td></tr>
   <tr><td><code>wait_for_agent</code></td><td>Block until a specific child completes, collect its result</td></tr>
   <tr><td><code>send_message</code></td><td>Send a mid-execution message to a running child</td></tr>
   <tr><td><code>interrupt_agent</code></td><td>Stop a running child and collect its partial result</td></tr>
   <tr><td><code>list_agents</code></td><td>Enumerate all active children with their statuses</td></tr>
-</table>
+</table></div>
 
 <h3>Spawn options</h3>
 
@@ -281,14 +283,14 @@ interface SpawnAcpParams {
 
 <p>At <code>middleware/async_subagents.py:866</code>, <code>AsyncSubAgentMiddleware</code> exposes five tools for remote sub-agent lifecycle management:</p>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Tool</th><th>Purpose</th></tr>
   <tr><td><code>start_async_task</code></td><td>Launch a sub-agent on a remote LangGraph deployment</td></tr>
   <tr><td><code>check_async_task</code></td><td>Poll the status of a remote sub-agent</td></tr>
   <tr><td><code>update_async_task</code></td><td>Modify a running remote sub-agent's instructions</td></tr>
   <tr><td><code>cancel_async_task</code></td><td>Terminate a remote sub-agent</td></tr>
   <tr><td><code>list_async_tasks</code></td><td>Enumerate all remote sub-agents with their statuses</td></tr>
-</table>
+</table></div>
 
 <p>This is unique among our codebases: DeepAgents async sub-agents are the <strong>only</strong> sub-agent implementation that uses LangGraph SDK for remote execution. The sub-agent runs on a separate LangGraph deployment, not in the parent process. Task state is tracked in <code>AsyncSubAgentState.async_tasks</code> via <code>_tasks_reducer</code>.</p>
 
@@ -331,7 +333,7 @@ interface SpawnAcpParams {
 
 <h2>Comparative table</h2>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Codebase</th><th>Spawn Model</th><th>Context Isolation</th><th>Concurrency</th><th>Budget Model</th><th>Results Flow</th><th>Nesting</th></tr>
   <tr><td><strong>claude-code</strong></td><td>In-process (forked context)</td><td>Cloned ToolUseContext</td><td>Sync + Async + Swarm</td><td>Shared (parent-managed)</td><td>Return value / callback</td><td>Yes (fork)</td></tr>
   <tr><td><strong>hermes-agent</strong></td><td>ThreadPoolExecutor</td><td>New AIAgent instance</td><td>max_concurrent_children=3</td><td>Per-child IterationBudget (50)</td><td>Return value (blocking)</td><td>Yes (orchestrator role, max depth)</td></tr>
@@ -342,7 +344,7 @@ interface SpawnAcpParams {
   <tr><td><strong>openclaw</strong></td><td>ACP spawn</td><td>ACP channel isolation</td><td>24 ACP channels</td><td>Per-agent model + thinking config</td><td>Channel subscription</td><td>Yes (ACP routing)</td></tr>
   <tr><td><strong>deepagents</strong></td><td>In-process (LangGraph state)</td><td>Shared state (excl. messages, todos, structured_response)</td><td>Sequential (sync) / Remote via LangGraph SDK (async)</td><td>Per sub-agent spec (model, tools, middleware)</td><td>Return value (sync) / Polling via check_async_task (async)</td><td>Yes (task tool)</td></tr>
   <tr><td><strong>deerflow</strong></td><td>Dual thread pools (scheduler + executor)</td><td>Full (checkpointer=False, no state sharing)</td><td>MAX_CONCURRENT_SUBAGENTS=3 (truncation)</td><td>Per sub-agent: max_turns (50), timeout_seconds (900)</td><td>Polling (5s interval)</td><td>Yes (general-purpose has task tool)</td></tr>
-</table>
+</table></div>
 
 <h2>Design heuristics</h2>
 

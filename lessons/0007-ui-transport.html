@@ -11,6 +11,8 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #5a5a5a, #4a90d9, #28a745, #ffc107, #dc3545); border-radius: 3px; }
+  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
+  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -87,7 +89,7 @@ from prompt_toolkit.key_binding import KeyBindings
 # Contrast with Pi-mono: everything below TextArea/KeyBindings
 # is implemented from scratch at packages/tui/src/tui.ts (53KB)</code></pre>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Codebase</th><th>TUI Library</th><th>Language</th><th>Key File(s)</th><th>Rendering Paradigm</th></tr>
   <tr><td>Claude Code</td><td>Custom Ink fork (React)</td><td>TypeScript</td><td>src/ink/ink.tsx (251KB), Messages.tsx (147KB), VirtualMessageList.tsx (148KB)</td><td>Declarative JSX + Virtual DOM diff</td></tr>
   <tr><td>Codex</td><td>ratatui + crossterm</td><td>Rust</td><td>codex-rs/tui/src/tui.rs, app.rs (58KB)</td><td>Retained-mode widget tree</td></tr>
@@ -95,7 +97,7 @@ from prompt_toolkit.key_binding import KeyBindings
   <tr><td>Hermes-agent</td><td>prompt_toolkit</td><td>Python</td><td>cli.py</td><td>Widget composition + key bindings</td></tr>
   <tr><td>Opencode</td><td>OpenTUI + Solid.js</td><td>TypeScript</td><td>packages/tui/src/app.tsx (36KB)</td><td>Reactive JSX (signals, no vDOM)</td></tr>
   <tr><td>Nanobot</td><td>prompt_toolkit + rich</td><td>Python</td><td>cli/commands.py (67KB)</td><td>Prompt loop + rich formatting</td></tr>
-</table>
+</table></div>
 
 <h2>Client/Server splits</h2>
 
@@ -189,7 +191,7 @@ class BaseChannel(ABC):
 
 <h2>Comparative table</h2>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Codebase</th><th>Interface Paradigm</th><th>TUI Library</th><th>Client/Server Split</th><th>Multi-Channel</th><th>Rendering Approach</th></tr>
   <tr><td>Claude Code</td><td>REPL/TUI + structured IO</td><td>Custom Ink fork (React)</td><td>No (monolith)</td><td>No</td><td>Virtual DOM diff with virtual scrolling</td></tr>
   <tr><td>Pi-mono</td><td>REPL/TUI</td><td>Custom (from scratch, 53KB)</td><td>No (monolith)</td><td>No</td><td>Imperative component rendering</td></tr>
@@ -200,7 +202,7 @@ class BaseChannel(ABC):
   <tr><td>OpenClaw</td><td>Daemon + Multi-channel</td><td>None (headless gateway)</td><td>Yes (gateway protocol)</td><td>Yes (24 channels)</td><td>N/A (message bus output)</td></tr>
   <tr><td>DeepAgents</td><td>CLI + LangGraph Server API</td><td>None (Click/argparse CLI)</td><td>Yes (LangGraph Server)</td><td>No</td><td>LangGraph stream modes (8 modes)</td></tr>
   <tr><td>DeerFlow</td><td>Web UI + Multi-channel + Embedded + REST</td><td>None (Next.js + IM channels)</td><td>Yes (nginx → Gateway + Frontend)</td><td>Yes (7 IM platforms)</td><td>SSE streaming via StreamBridge</td></tr>
-</table>
+</table></div>
 
 <h2>Design heuristics</h2>
 

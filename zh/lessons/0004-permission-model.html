@@ -11,6 +11,8 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #adb5bd, #ffc107, #dc3545); border-radius: 3px; }
+  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
+  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -247,7 +249,7 @@ class ToolEntry:
 
 <p>这两个代码库代表了安全空间内设计光谱的两端。DeepAgents 拥有<strong>传统权限模型</strong>（对操作进行 allow/deny/ask），而 DeerFlow 拥有<strong>结构性安全模型</strong>（沙箱边界 + 虚拟路径 + 大小上限）。它们是解决约束 agent 能做什么这一同一问题的两种根本不同的方法。</p>
 
-<table>
+<div class="tbl"><table>
   <tr><th>维度</th><th>DeepAgents（传统 ACL）</th><th>DeerFlow（结构性安全）</th></tr>
   <tr><td><strong>安全范式</strong></td><td>权限模型 — 针对每个操作的用户配置规则</td><td>结构性模型 — 运行时架构中的硬边界</td></tr>
   <tr><td><strong>执行层级</strong></td><td>工具操作级别（每个读/写/编辑单独检查）</td><td>沙箱边界级别（路径白名单、遍历检测、大小上限）</td></tr>
@@ -257,7 +259,7 @@ class ToolEntry:
   <tr><td><strong>审计</strong></td><td>通过中断追踪隐式实现</td><td>通过 SandboxAuditMiddleware 显式实现</td></tr>
   <tr><td><strong>绕过风险</strong></td><td>权限配置错误（错误的路径模式或遗漏的规则）</td><td>沙箱逃逸（路径遍历、宿主机 bash 泄露）— 由 _reject_path_traversal 和宿主机 bash 开关缓解</td></tr>
   <tr><td><strong>适用场景</strong></td><td>当你需要细粒度、面向用户的权限控制时（例如"允许读取 docs/ 但在写入 src/ 之前询问"）</td><td>当你需要以最少配置实现硬边界时（例如"agent 只能触碰 /mnt/user-data，就这样"）</td></tr>
-</table>
+</table></div>
 
 <div class="callout">
   <strong>关键洞察：</strong> DeepAgents 在每个操作之前询问 LLM 的所有者"我可以这样做吗？" — 权限存在于<em>用户与 agent 之间的关系</em>中。DeerFlow 筑起墙壁使某些操作在结构上不可能 — 安全存在于<em>运行时的架构</em>中。两者并非孰优孰劣；它们解决不同的威胁模型。有 shell 访问权限的 agent 需要 DeerFlow 式的边界。在已知仓库中进行代码审查的 agent 则受益于 DeepAgents 式的粒度。
@@ -265,7 +267,7 @@ class ToolEntry:
 
 <h2>对比总表</h2>
 
-<table>
+<div class="tbl"><table>
   <tr><th>维度</th><th>claude-code</th><th>codex</th><th>opencode</th><th>deepagents</th><th>deerflow</th><th>pi-mono</th><th>openclaw</th><th>hermes-agent</th><th>nanobot</th></tr>
   <tr><td><strong>审批模型</strong></td><td>ACL（allow/ask/deny）</td><td>OS 沙箱 + 审批</td><td>ACL（Effect-TS）</td><td>ACL（逐操作、逐路径）</td><td>结构性（虚拟路径、大小上限）</td><td>钩子（消费者）</td><td>钩子（消费者）</td><td>无（check_fn）</td><td>无（SSRF 提示）</td></tr>
   <tr><td><strong>沙箱化</strong></td><td>无</td><td>Landlock / Win / Mac + 提升重试</td><td>无</td><td>无</td><td>虚拟路径白名单、遍历检测、bash 开关</td><td>无</td><td>无</td><td>无</td><td>无</td></tr>
@@ -275,7 +277,7 @@ class ToolEntry:
   <tr><td><strong>Deny 时的回退</strong></td><td>用户提示</td><td>提升沙箱并重试</td><td>向 LLM 返回错误结果</td><td>LangGraph 中断（等待人工）</td><td>向 LLM 返回错误 ToolMessage</td><td>向 LLM 返回错误结果</td><td>向 LLM 返回错误结果</td><td>工具静默排除</td><td>向 LLM 递进提示</td></tr>
   <tr><td><strong>审计追踪</strong></td><td>无（仅权限决定）</td><td>无（内核强制）</td><td>无</td><td>隐式（中断追踪）</td><td>显式（SandboxAuditMiddleware）</td><td>无</td><td>无</td><td>无</td><td>无</td></tr>
   <tr><td><strong>独特之处</strong></td><td>三级作用域持久化</td><td>重试时 OS 沙箱提升</td><td>物化时过滤</td><td>逐操作（而非逐工具）ACL 粒度</td><td>结构性墙壁，而非权限规则</td><td>框架零意见</td><td>钩子 + 进度流</td><td>基于 AST 的工具发现</td><td>runner 中 SSRF 检测</td></tr>
-</table>
+</table></div>
 
 <h2>核心权衡：安全 vs. 复杂度</h2>
 

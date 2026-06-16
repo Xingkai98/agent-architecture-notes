@@ -11,6 +11,8 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #adb5bd, #ffc107, #dc3545); border-radius: 3px; }
+  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
+  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -246,7 +248,7 @@ class ToolEntry:
 
 <p>These two codebases represent opposing ends of a design spectrum within the security space. DeepAgents has a <strong>traditional permission model</strong> (allow/deny/ask on operations), while DeerFlow has a <strong>structural security model</strong> (sandbox boundaries + virtual paths + size caps). They are two fundamentally different approaches to the same problem of constraining what an agent can do.</p>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Dimension</th><th>DeepAgents (traditional ACL)</th><th>DeerFlow (structural security)</th></tr>
   <tr><td><strong>Security paradigm</strong></td><td>Permission model — user-configured rules for each operation</td><td>Structural model — hard boundaries in the runtime architecture</td></tr>
   <tr><td><strong>Enforcement level</strong></td><td>Tool-operation level (each read/write/edit checked individually)</td><td>Sandbox boundary level (path whitelist, traversal detection, size caps)</td></tr>
@@ -256,7 +258,7 @@ class ToolEntry:
   <tr><td><strong>Audit</strong></td><td>Implicit via interrupt trail</td><td>Explicit via SandboxAuditMiddleware</td></tr>
   <tr><td><strong>Bypass risk</strong></td><td>Permission misconfiguration (wrong path pattern or missing rule)</td><td>Sandbox escape (path traversal, host bash leak) — mitigated by _reject_path_traversal and host bash toggle</td></tr>
   <tr><td><strong>When to choose</strong></td><td>When you need fine-grained, user-facing permission control (e.g., "allow reading docs/ but ask before writing src/")</td><td>When you need hard boundaries with minimal configuration (e.g., "the agent can only touch /mnt/user-data, period")</td></tr>
-</table>
+</table></div>
 
 <div class="callout">
   <strong>Key insight:</strong> DeepAgents asks the LLM's owner "may I do this?" before each operation — the permission lives in the <em>relationship between user and agent</em>. DeerFlow builds walls so certain operations are structurally impossible — the security lives in the <em>architecture of the runtime</em>. Neither is inherently better; they solve different threat models. An agent with shell access needs DeerFlow-style boundaries. An agent doing code review in a known repo benefits from DeepAgents-style granularity.
@@ -264,7 +266,7 @@ class ToolEntry:
 
 <h2>Comparative table</h2>
 
-<table>
+<div class="tbl"><table>
   <tr><th>Dimension</th><th>claude-code</th><th>codex</th><th>opencode</th><th>deepagents</th><th>deerflow</th><th>pi-mono</th><th>openclaw</th><th>hermes-agent</th><th>nanobot</th></tr>
   <tr><td><strong>Approval model</strong></td><td>ACL (allow/ask/deny)</td><td>OS sandbox + approval</td><td>ACL (Effect-TS)</td><td>ACL (per-op, per-path)</td><td>Structural (virtual paths, size caps)</td><td>Hook (consumer)</td><td>Hook (consumer)</td><td>None (check_fn)</td><td>None (SSRF hints)</td></tr>
   <tr><td><strong>Sandboxing</strong></td><td>None</td><td>Landlock / Win / Mac + retry escalation</td><td>None</td><td>None</td><td>Virtual path whitelist, traversal detection, bash toggle</td><td>None</td><td>None</td><td>None</td><td>None</td></tr>
@@ -274,7 +276,7 @@ class ToolEntry:
   <tr><td><strong>Fallback on deny</strong></td><td>User prompt</td><td>Escalate sandbox + retry</td><td>Error result to LLM</td><td>LangGraph interrupt (await human)</td><td>Error ToolMessage to LLM</td><td>Error result to LLM</td><td>Error result to LLM</td><td>Tool silently excluded</td><td>Escalating hint to LLM</td></tr>
   <tr><td><strong>Audit trail</strong></td><td>No (permission decision only)</td><td>No (kernel enforcement)</td><td>No</td><td>Implicit (interrupt trail)</td><td>Explicit (SandboxAuditMiddleware)</td><td>No</td><td>No</td><td>No</td><td>No</td></tr>
   <tr><td><strong>Unique</strong></td><td>Three-scope persistence</td><td>OS sandbox escalation on retry</td><td>Materialization-time filtering</td><td>Per-operation (not per-tool) ACL granularity</td><td>Structural walls, not permission rules</td><td>Zero framework opinion</td><td>Hook + progress streaming</td><td>AST-based tool discovery</td><td>SSRF detection in runner</td></tr>
-</table>
+</table></div>
 
 <h2>The fundamental tradeoff: safety vs. complexity</h2>
 
