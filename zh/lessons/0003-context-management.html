@@ -11,8 +11,6 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
-  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
-  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -138,15 +136,31 @@ type SessionEntry =
 
 <p><code>agent/context_compressor.py</code> 中的 <code>ContextCompressor</code> 运行一个五阶段算法：</p>
 
-<div class="diagram">
-┌─────────┐    ┌─────────────┐    ┌──────────────┐    ┌─────────────┐    ┌──────────────┐
-│  阶段 1  │ →  │   阶段 2    │ →  │   阶段 3      │ →  │   阶段 4    │ →  │   阶段 5      │
-│  修剪    │    │  边界判定   │    │  既有摘要     │    │  LLM 摘要   │    │   组装        │
-│          │    │             │    │               │    │              │    │              │
-│ 修剪冗长  │    │ 哪些消息    │    │ 更新 vs.      │    │ 生成         │    │ 前缀 +       │
-│ 工具输出  │    │ 保留原始 vs.│    │ 重新创建      │    │ 简洁         │    │ 摘要 +       │
-│          │    │ 被摘要     │    │ 摘要          │    │ 摘要         │    │ 最近消息     │
-└─────────┘    └─────────────┘    └──────────────┘    └─────────────┘    └──────────────┘
+<div class="flowchart">
+  <div class="fc-box">
+    <div class="fc-label">阶段 1：修剪</div>
+    <div class="fc-desc">修剪冗长工具输出</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">阶段 2：边界判定</div>
+    <div class="fc-desc">哪些消息保留原始 vs. 被摘要</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">阶段 3：既有摘要</div>
+    <div class="fc-desc">更新 vs. 重新创建摘要</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">阶段 4：LLM 摘要</div>
+    <div class="fc-desc">生成简洁摘要</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">阶段 5：组装</div>
+    <div class="fc-desc">前缀 + 摘要 + 最近消息</div>
+  </div>
 </div>
 
 <ol>

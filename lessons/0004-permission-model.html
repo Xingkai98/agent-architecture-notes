@@ -11,8 +11,6 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #adb5bd, #ffc107, #dc3545); border-radius: 3px; }
-  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
-  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -97,14 +95,26 @@ buildTool({
 
 <p>The <code>ToolOrchestrator</code> in <code>codex-rs/core/src/tools/orchestrator.rs</code> runs every tool through a four-stage pipeline:</p>
 
-<div class="diagram">
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│   APPROVAL   │ →  │   SANDBOX    │ →  │   EXECUTE    │ →  │    RETRY     │
-│              │    │  SELECTION   │    │              │    │ (escalated)  │
-│ User prompt  │    │ Landlock /   │    │ Run tool     │    │ If sandbox   │
-│ or auto-     │    │ Win / Mac    │    │ inside       │    │ blocked,     │
-│ approve      │    │ sandbox pick │    │ sandbox      │    │ retry higher │
-└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+<div class="flowchart">
+  <div class="fc-box">
+    <div class="fc-label">APPROVAL</div>
+    <div class="fc-desc">User prompt or auto-approve</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">SANDBOX SELECTION</div>
+    <div class="fc-desc">Landlock / Win / Mac sandbox pick</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">EXECUTE</div>
+    <div class="fc-desc">Run tool inside sandbox</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">RETRY (escalated)</div>
+    <div class="fc-desc">If blocked, retry higher</div>
+  </div>
 </div>
 
 <p><strong>Approval:</strong> Before execution, the orchestrator checks whether the tool needs user approval. Network access has its own approval system with two modes: <strong>immediate</strong> (ask now) and <strong>deferred</strong> (allow the tool to run but gate network use until approved).</p>

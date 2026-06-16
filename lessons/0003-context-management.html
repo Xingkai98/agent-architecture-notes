@@ -11,8 +11,6 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
-  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
-  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -138,15 +136,31 @@ type SessionEntry =
 
 <p>The <code>ContextCompressor</code> at <code>agent/context_compressor.py</code> runs a 5-phase algorithm:</p>
 
-<div class="diagram">
-┌─────────┐    ┌─────────────┐    ┌──────────────┐    ┌─────────────┐    ┌──────────────┐
-│  PHASE 1 │ →  │   PHASE 2   │ →  │   PHASE 3    │ →  │   PHASE 4   │ →  │   PHASE 5    │
-│  Prune   │    │  Boundaries │    │ Prior Summary │    │  LLM Summary │    │   Assemble   │
-│          │    │             │    │               │    │              │    │              │
-│ Trim     │    │ Which msgs  │    │ Update vs.    │    │ Generate     │    │ prefix +     │
-│ verbose  │    │ stay raw    │    │ re-create     │    │ concise      │    │ summary +    │
-│ tool out │    │ vs. summary │    │ summary       │    │ summary      │    │ recent msgs  │
-└─────────┘    └─────────────┘    └──────────────┘    └─────────────┘    └──────────────┘
+<div class="flowchart">
+  <div class="fc-box">
+    <div class="fc-label">PHASE 1: Prune</div>
+    <div class="fc-desc">Trim verbose tool output</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">PHASE 2: Boundaries</div>
+    <div class="fc-desc">Which msgs stay raw vs. summary</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">PHASE 3: Prior Summary</div>
+    <div class="fc-desc">Update vs. re-create summary</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">PHASE 4: LLM Summary</div>
+    <div class="fc-desc">Generate concise summary</div>
+  </div>
+  <div class="fc-arrow">→</div>
+  <div class="fc-box">
+    <div class="fc-label">PHASE 5: Assemble</div>
+    <div class="fc-desc">prefix + summary + recent msgs</div>
+  </div>
 </div>
 
 <ol>

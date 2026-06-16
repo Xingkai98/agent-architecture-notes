@@ -81,7 +81,18 @@ a:hover { text-decoration: underline; }
 .quiz .option.wrong { background: #f8d7da; border-color: #dc3545; }
 .quiz .feedback { margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.5rem; }
 
-.diagram { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1rem 0; font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.82rem; white-space: pre; line-height: 1.3; overflow-x: auto; }
+.diagram { background: #fafaf3; border: 1px solid var(--rule); padding: 1.2rem 1.5rem; margin: 1rem 0; font-family: "SF Mono", "Monaco", "Menlo", "Consolas", "DejaVu Sans Mono", "Liberation Mono", monospace; font-size: 0.84rem; white-space: pre; line-height: 1.25; overflow-x: auto; }
+
+/* HTML/CSS flowcharts — replacement for ASCII box-drawing diagrams */
+.flowchart { display: flex; align-items: center; gap: 0.4rem; margin: 1rem 0; overflow-x: auto; }
+.flowchart .fc-box { border: 2px solid var(--rule); background: #fafaf6; padding: 0.5rem 0.7rem; text-align: center; flex: 1 0 auto; min-width: 80px; }
+.flowchart .fc-box .fc-label { font-weight: 700; font-size: 0.82rem; margin-bottom: 0.15rem; }
+.flowchart .fc-box .fc-desc { font-size: 0.72rem; color: var(--muted); line-height: 1.25; }
+.flowchart .fc-arrow { font-size: 1.1rem; color: var(--muted); flex-shrink: 0; user-select: none; }
+.flowchart.wide { flex-wrap: wrap; }
+
+.tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
+.tbl table { margin: 0; }
 
 dt { font-weight: 600; margin-top: 0.8rem; font-size: 0.95rem; }
 dd { margin-left: 1.5rem; font-size: 0.92rem; margin-bottom: 0.5rem; }

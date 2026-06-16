@@ -11,8 +11,6 @@
   .spectrum .left { font-weight: 600; }
   .spectrum .right { font-weight: 600; }
   .spectrum .bar { flex: 1; height: 6px; margin: 0 1rem; background: linear-gradient(to right, #28a745, #ffc107, #dc3545); border-radius: 3px; }
-  .tbl { overflow-x: auto; margin: 1rem 0 1.5rem; }
-  .tbl table { margin: 0; }
 </style>
 </head>
 <body>
@@ -35,14 +33,27 @@
 
 <p>每个 agent 错误都可以归入五个类别之一。每个代码库以不同方式处理它们，但这些类别是通用的：</p>
 
-<div class="diagram">
-┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
-│   API 错误      │  │  上下文溢出     │  │   格式错误      │  │   工具失败      │  │    中止         │
-│                 │  │                 │  │   响应         │  │                 │  │                 │
-│ 401, 429, 5xx,  │  │ Prompt 太长，   │  │  JSON 解析     │  │  超时，         │  │  用户取消，     │
-│ 超时，          │  │ token 预算      │  │  失败，         │  │  非零退出码，   │  │  hook 否决，    │
-│ 连接错误        │  │ 超出           │  │  流中断         │  │  沙箱拒绝       │  │  超过最大轮次   │
-└─────────────────┘  └─────────────────┘  └─────────────────┘  └─────────────────┘  └─────────────────┘
+<div class="flowchart wide">
+  <div class="fc-box">
+    <div class="fc-label">API 错误</div>
+    <div class="fc-desc">401, 429, 5xx, 超时, 连接错误</div>
+  </div>
+  <div class="fc-box">
+    <div class="fc-label">上下文溢出</div>
+    <div class="fc-desc">Prompt 太长, token 预算超出</div>
+  </div>
+  <div class="fc-box">
+    <div class="fc-label">格式错误响应</div>
+    <div class="fc-desc">JSON 解析失败, 流中断</div>
+  </div>
+  <div class="fc-box">
+    <div class="fc-label">工具失败</div>
+    <div class="fc-desc">超时, 非零退出码, 沙箱拒绝</div>
+  </div>
+  <div class="fc-box">
+    <div class="fc-label">中止</div>
+    <div class="fc-desc">用户取消, hook 否决, 超过最大轮次</div>
+  </div>
 </div>
 
 <h2>恢复理念的两个极端</h2>
