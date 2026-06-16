@@ -18,3 +18,4 @@ podcast-scripts/tmp_segments/
 
 # Cloned reference repos
 reference/frameworks/
+podcast-scripts/*.mp3
