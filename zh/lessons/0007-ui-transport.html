@@ -23,9 +23,9 @@
 
 <h1>第7课：UI 与传输层</h1>
 <p class="subtitle">TUI 框架、客户端/服务端分离以及多频道适配器 —— agent 如何与外界对话。</p>
-<p class="meta">2026年6月 · 7 个主要源代码库 · <a href="0007-ui-transport.html">固定链接</a></p>
+<p class="meta">2026年6月 · 9 个主要源代码库 · <a href="0007-ui-transport.html">固定链接</a></p>
 
-<p class="sidenote">每个 agent 都需要一个界面。对某些 agent 来说，这个界面是终端（<strong>Claude Code</strong>、<strong>Pi-mono</strong>、<strong>Codex</strong>、<strong>Opencode</strong>）。对另一些来说，是消息应用（<strong>OpenClaw</strong> 支持 24 个频道，<strong>Nanobot</strong> 支持 18 个）。再其他的则是桌面应用或 API 服务器。传输层的选择塑造了其上的一切：工具如何渲染结果、流式传输如何工作、错误如何呈现给用户。</p>
+<p class="sidenote">每个 agent 都需要一个界面。对某些 agent 来说，这个界面是终端（<strong>Claude Code</strong>、<strong>Pi-mono</strong>、<strong>Codex</strong>、<strong>Opencode</strong>、<strong>DeepAgents</strong>）。对另一些来说，是消息应用（<strong>OpenClaw</strong> 支持 24 个频道，<strong>Nanobot</strong> 支持 18 个，<strong>DeerFlow</strong> 支持 7 个）。再其他的则是桌面应用、Web UI 或 API 服务器。传输层的选择塑造了其上的一切：工具如何渲染结果、流式传输如何工作、错误如何呈现给用户。</p>
 
 <p>在<a href="0002-tool-system.html">第2课</a>中，我们了解了工具是如何定义、注册、分发和规范化的。本课向上移动一层：<em>这些工具结果如何到达用户</em>，以及用户的输入如何到达 agent。我们将纵览完整的界面范式频谱，详细比较六种 TUI 实现，分析客户端/服务端架构，并描绘多频道领域的地图。</p>
 
@@ -99,7 +99,7 @@ from prompt_toolkit.key_binding import KeyBindings
 
 <h2>客户端/服务端分离</h2>
 
-<p>三个代码库将 agent 进程与 UI 进程分离——这一设计选择使得远程操作、无头部署和多前端成为可能：</p>
+<p>四个代码库将 agent 进程与 UI 进程分离——这一设计选择使得远程操作、无头部署和多前端成为可能：</p>
 
 <h3>Opencode：Web Worker 服务端 + RPC + TUI 客户端</h3>
 
@@ -113,9 +113,15 @@ from prompt_toolkit.key_binding import KeyBindings
 
 <p>OpenClaw 在 <code>packages/gateway-protocol/</code> 中定义了一个正式的 gateway 协议，并配有对应的 <code>gateway-client/</code> 包。该协议规定了消息格式、认证和传输——任何能够使用该协议的客户端都可以驱动 agent。这比 Codex 的即兴客户端/服务端分离更进一步：协议是版本化的、文档化的和可复用的。</p>
 
+<h3>DeepAgents：CLI + LangGraph Server</h3>
+
+<p>DeepAgents 采用模块化的传输方式，在 LangGraph 基础设施之上提供三个独立的交互面。主要的开发者界面是 <code>dcode</code>，一个通过 <code>curl -LsSf https://langch.in/dcode | bash</code> 安装的 CLI 工具。其突出特性是交互式 <code>/model</code> 命令，允许用户在对话过程中切换 LLM 提供商而无需重启会话。配置文件位于 <code>~/.deepagents/config.toml</code>。</p>
+
+<p>对于编程式使用，Python SDK 的 <code>create_deep_agent()</code> 返回一个 <code>CompiledStateGraph</code>——一个可以直接在进程内调用或通过 LangGraph Server 服务的 LangGraph 图。服务器暴露标准的 LangGraph 兼容 REST API 用于远程调用。流式传输继承了全部 8 种 LangGraph 流模式：<code>values</code>、<code>updates</code>、<code>messages</code>、<code>custom</code>、<code>checkpoints</code>、<code>tasks</code>、<code>debug</code> 和 <code>tools</code>。这是整个集合中最简单的传输模型——DeepAgents 不构建自己的协议或消息总线。它继承了 LangGraph 经过实战检验的流式和多模式基础设施，以架构复杂性换取成熟、文档完善的基础。</p>
+
 <h2>Multi-channel（消息机器人）</h2>
 
-<p>两个代码库远远超越了终端 UI——它们首先是消息平台，其次才是 agent：</p>
+<p>三个代码库远远超越了终端 UI——它们首先是消息平台，其次才是 agent：</p>
 
 <h3>OpenClaw：24 个频道</h3>
 
@@ -137,6 +143,21 @@ class BaseChannel(ABC):
 # 消息以标准化类型到达总线；总线将其路由到 agent。
 # 响应通过总线返回；频道适配器为其平台格式化它们。</code></pre>
 
+<h3>DeerFlow：7 个 IM 平台 + Web UI + 嵌入式客户端</h3>
+
+<p>DeerFlow 拥有全部九个代码库中最复杂的多频道传输架构。传输层是一等架构维度——而非附加组件——具有四个独立的交互面：</p>
+
+<ul>
+  <li><strong>消息网关：</strong> 原生支持 Telegram、Slack、飞书/Lark、Discord、钉钉、微信和企业微信——无需公网 IP 或 webhook 隧道。</li>
+  <li><strong>Web UI：</strong> Next.js 前端通过 nginx 在端口 2026 提供服务，底层是端口 8001 的 FastAPI Gateway API，提供 threads、runs、models、MCP、skills、memory、uploads、artifacts、suggestions、feedback 和 channels 等 REST 端点。</li>
+  <li><strong>嵌入式客户端：</strong> <code>DeerFlowClient</code> 提供直接的进程内访问，无需启动任何 HTTP 服务——适用于脚本、测试和编程编排。</li>
+  <li><strong>LangGraph 兼容端点：</strong> Nginx 将 <code>/api/langgraph/*</code> 路由到 Gateway 运行时（8001），使标准 LangGraph 客户端可以连接。</li>
+</ul>
+
+<p>IM 频道系统（<code>app/channels/</code>）在架构上是最有趣的部分。它建立在 <strong>MessageBus</strong> 之上——一个异步发布/订阅层，将 agent 与任何特定平台解耦。每个平台的实现处理平台特定的行为：飞书/Lark 适配器原地修补卡片（在 agent 推进时更新单条消息而非发布新消息），而 Telegram 适配器编辑"Working on it..."占位消息。用户拥有的频道绑定通过 <code>channel_connections</code> 管理，允许每个用户连接自己的账户，而无需共享同一个机器人身份。</p>
+
+<p>SSE 流式传输使用 <strong>StreamBridge</strong>（worker.py 第 317 行）：<code>bridge.publish(run_id, sse_event, ...)</code> 将事件传递给所有连接的客户端。完整的 nginx 路由表为：<code>/api/langgraph/*</code> → Gateway 运行时（8001），<code>/api/*</code> → Gateway API（8001），<code>/</code> → 前端（3000）。</p>
+
 <h3>Hermes-agent：桌面 + CLI</h3>
 
 <p>Hermes-agent 采取了不同的方法：一个桌面 Electron 应用位于 <code>apps/desktop/</code>，使用 React + Vite 构建，加上一个 <code>cli.py</code> 用于终端使用。桌面应用提供图形化聊天界面，而 CLI 服务于脚本和高级用户。这是整个集合中唯一提供 GUI 的代码库。</p>
@@ -154,7 +175,7 @@ class BaseChannel(ABC):
 
 <h2>值得关注的设计选择</h2>
 
-<p>四个值得研究的实现细节：</p>
+<p>五个值得研究的实现细节：</p>
 
 <p><strong>Claude Code 的 Ink fork：</strong> TUI 就是应用程序本身。<code>Messages.tsx</code> 的 147KB 不是一个"视图层"——它是核心用户体验。工具结果、流式文本、权限提示和模式指示器全部通过 React 组件渲染。该 fork 的存在是因为没有现成的终端 UI 库能以这种规模处理流式 agent 对话。</p>
 
@@ -163,6 +184,8 @@ class BaseChannel(ABC):
 <p><strong>OpenClaw 的频道目录：</strong> <code>dist/channel-catalog.json</code> 在构建时从扩展清单生成。这意味着 agent 在启动前就知道其可用的频道——无需运行时扫描、无动态导入、无竞争条件。这是一个小小的细节，却消除了一整类启动错误。</p>
 
 <p><strong>Nanobot 的 OpenAI 兼容 API 服务器：</strong> <code>api/server.py</code> 是一个薄的 aiohttp 封装，暴露了 <code>/v1/chat/completions</code>。这意味着任何可以调用 OpenAI API 的工具——langchain、openai-python、curl——都可以驱动 Nanobot，而不需要知道它不是在跟 OpenAI 对话。agent 成为了一个可直接替换的替代方案。</p>
+
+<p><strong>DeerFlow 的四层架构：</strong> 没有其他代码库能同时通过四个独立的传输面暴露 agent——IM 网关（7 个平台）、Web UI（Next.js）、REST API（FastAPI）和嵌入式客户端（进程内）。IM 频道系统不是插件目录，而是一个结构化的 MessageBus，配合处理平台特定渲染的适配器（飞书的原地卡片修补、Telegram 的占位消息编辑）。这种设计将频道层视为 agent 核心的架构同级，而非附加组件。</p>
 
 <h2>对比表格</h2>
 
@@ -175,6 +198,8 @@ class BaseChannel(ABC):
   <tr><td>Opencode</td><td>TUI + 支持 Web</td><td>OpenTUI + Solid.js</td><td>是（Worker + RPC + HTTP）</td><td>否</td><td>响应式 JSX（signals）</td></tr>
   <tr><td>Nanobot</td><td>TUI + 多频道 + API</td><td>prompt_toolkit + rich</td><td>否（单体）</td><td>是（18 个频道）</td><td>Prompt 循环 + rich 格式化</td></tr>
   <tr><td>OpenClaw</td><td>Daemon + 多频道</td><td>无（无头 gateway）</td><td>是（gateway protocol）</td><td>是（24 个频道）</td><td>N/A（消息总线输出）</td></tr>
+  <tr><td>DeepAgents</td><td>CLI + LangGraph Server API</td><td>无（Click/argparse CLI）</td><td>是（LangGraph Server）</td><td>否</td><td>LangGraph 流模式（8 种模式）</td></tr>
+  <tr><td>DeerFlow</td><td>Web UI + 多频道 + 嵌入式 + REST</td><td>无（Next.js + IM 频道）</td><td>是（nginx → Gateway + Frontend）</td><td>是（7 个 IM 平台）</td><td>SSE 流式传输 via StreamBridge</td></tr>
 </table>
 
 <h2>设计启发</h2>
@@ -222,11 +247,29 @@ class BaseChannel(ABC):
     <div class="option" data-q="3" data-a="d">基于 webhook 的扇入</div>
   </div>
   <div class="feedback" id="feedback3"></div>
+
+  <div class="question">Q4. 哪个代码库拥有最复杂的多频道传输架构，拥有 7 个 IM 平台外加 Web UI、REST API 和嵌入式客户端作为一等交互面？</div>
+  <div class="options">
+    <div class="option" data-q="4" data-a="a">OpenClaw</div>
+    <div class="option" data-q="4" data-a="b">Nanobot</div>
+    <div class="option" data-q="4" data-a="c">DeerFlow</div>
+    <div class="option" data-q="4" data-a="d">Hermes-agent</div>
+  </div>
+  <div class="feedback" id="feedback4"></div>
+
+  <div class="question">Q5. 哪个代码库提供了交互式 CLI 命令（<code>/model</code>），可以在对话中切换 LLM 提供商？</div>
+  <div class="options">
+    <div class="option" data-q="5" data-a="a">Claude Code</div>
+    <div class="option" data-q="5" data-a="b">DeepAgents</div>
+    <div class="option" data-q="5" data-a="c">Pi-mono</div>
+    <div class="option" data-q="5" data-a="d">Codex</div>
+  </div>
+  <div class="feedback" id="feedback5"></div>
 </div>
 
 <script>
 (function() {
-  var answers = { 1: 'b', 2: 'b', 3: 'c' };
+  var answers = { 1: 'b', 2: 'b', 3: 'c', 4: 'c', 5: 'b' };
   document.querySelectorAll('.option').forEach(function(opt) {
     opt.addEventListener('click', function() {
       var q = this.dataset.q;
@@ -253,7 +296,7 @@ class BaseChannel(ABC):
   <li><strong>Web UI 实现</strong> —— 一些代码库有 Web 仪表板，但没有作为主要界面进行深入分析。</li>
   <li><strong>流式传输协议</strong> —— server-sent events、WebSocket 和 chunked transfer encoding 如何将 agent 输出传输给客户端。部分涵盖在<a href="0001-core-agent-loop.html">第1课</a>（流式 vs. 批处理）。</li>
   <li><strong>IDE 集成细节</strong> —— Claude Code 的结构化 IO 模式、Codex 的 VS Code 扩展和 Opencode 的编辑器插件内部如何工作。</li>
-  <li><strong>移动界面</strong> —— 七个代码库都没有发布移动应用，尽管消息频道（Telegram、WhatsApp）提供了事实上的移动访问。</li>
+  <li><strong>移动界面</strong> —— 九个代码库都没有发布移动应用，尽管消息频道（Telegram、WhatsApp、微信）提供了事实上的移动访问。</li>
 </ul>
 
 <h2>主要来源</h2>
@@ -265,6 +308,8 @@ class BaseChannel(ABC):
   <li><strong>Opencode</strong>：<code>packages/tui/src/app.tsx</code>（36KB、OpenTUI + Solid.js）、Web Worker 服务端 + RPC 架构</li>
   <li><strong>Nanobot</strong>：<code>cli/commands.py</code>（67KB、prompt_toolkit + rich）、<code>api/server.py</code>（aiohttp OpenAI 兼容）、18 个频道实现</li>
   <li><strong>OpenClaw</strong>：<code>packages/gateway-protocol/</code>、<code>gateway-client/</code>、24 个频道适配器、<code>dist/channel-catalog.json</code></li>
+  <li><strong>DeepAgents</strong>：<code>dcode</code> CLI（交互式 /model 命令、<code>~/.deepagents/config.toml</code>）、<code>create_deep_agent()</code> 返回 CompiledStateGraph、LangGraph Server REST API、8 种流模式</li>
+  <li><strong>DeerFlow</strong>：<code>app/channels/</code>（MessageBus + 各平台适配器）、Next.js 前端（端口 3000）、FastAPI Gateway API（端口 8001）、nginx 路由、SSE StreamBridge（worker.py 第 317 行）、DeerFlowClient 嵌入式客户端</li>
 </ol>
 
 <h2>推荐下一步阅读</h2>
@@ -273,6 +318,7 @@ class BaseChannel(ABC):
   <li>如果你想要<strong>最干净的多频道模式</strong>：研究 <code>OpenClaw: packages/gateway-protocol/</code> —— 该协议定义了独立于任何特定频道的消息格式、认证和传输。</li>
   <li>如果你想要<strong>最实用的 TUI 模式</strong>：阅读 <code>Pi-mono: packages/tui/src/tui.ts</code> —— 53KB 从零开始的终端渲染精确展示了 TUI 需要什么而不多不少。</li>
   <li>如果你想要<strong>频道实现深度</strong>：比较 Nanobot 的飞书频道（78KB）与其 Telegram 频道（64KB）——两个具有不同认证和事件模型的生产级适配器。</li>
+  <li>如果你想要<strong>最雄心勃勃的传输架构</strong>：研究 <code>DeerFlow: app/channels/</code> —— MessageBus + 各平台适配器模式配合原地卡片编辑，外加 nginx 路由的四层设计（IM 网关、Web UI、REST API、嵌入式客户端）。</li>
 </ul>
 
 <div class="callout">

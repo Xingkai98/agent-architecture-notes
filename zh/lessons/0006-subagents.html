@@ -23,11 +23,11 @@
 
 <h1>第6课：子智能体与任务委派</h1>
 <p class="subtitle">spawn、isolate、delegate、collect —— 每个多 agent 系统的四个动作。</p>
-<p class="meta">2026年6月 · 8 个主要源代码库 · <a href="0006-subagents.html">固定链接</a></p>
+<p class="meta">2026年6月 · 9 个主要源代码库 · <a href="0006-subagents.html">固定链接</a></p>
 
 <p class="sidenote">每个 sub-agent 系统都回答同样的四个问题：<strong>如何</strong> spawn 子级、<strong>能看到</strong>什么、<strong>能花多少</strong>资源、以及结果<strong>如何</strong>流回父级。各代码库之间的区别全部在于在<em>何处</em>划定隔离边界以及<em>如何</em>强制执行它。</p>
 
-<p>在<a href="0002-tool-system.html">第2课</a>中，我们看到工具是 agent 循环的引擎。本课将视角上移一层：<em>当一个 agent 变成多个时</em>。我们将追踪所有八个代码库中的 sub-agent spawn、上下文隔离、资源预算和结果收集，然后提取无论框架如何都成立的设计启发。</p>
+<p>在<a href="0002-tool-system.html">第2课</a>中，我们看到工具是 agent 循环的引擎。本课将视角上移一层：<em>当一个 agent 变成多个时</em>。我们将追踪所有九個代码库中的 sub-agent spawn、上下文隔离、资源预算和结果收集，然后提取无论框架如何都成立的设计启发。</p>
 
 <h2>Spawn 频谱</h2>
 
@@ -253,6 +253,82 @@ interface SpawnAcpParams {
 
 <p>OpenClaw 的 ACP 层为 agent 间通信提供了 24 个 channel。每个 agent 订阅它关心的 channel；ACP 路由器按 channel 订阅投递消息，而不是按 agent 身份。这种解耦意味着 agent 可以在不重新配置路由表的情况下添加、删除或替换。</p>
 
+<h2>DeepAgents —— 同步 sub-agent 与状态共享</h2>
+
+<p>DeepAgents 采用一种务实的方法：快速、同步且状态高效。Sub-agent 在进程内运行，共享父级的 LangGraph 状态——仅排除 messages、todos 和 structured_response。</p>
+
+<h3>SubAgentMiddleware</h3>
+
+<p>在 <code>middleware/subagents.py:734</code>，<code>SubAgentMiddleware</code> 向父 agent 暴露一个 <code>task</code> 工具。该工具由 <code>_build_task_tool()</code>（第528行）构建，接受 sub-agent 类型名称、任务描述和可选配置覆盖。</p>
+
+<h3>Sub-agent 规范与编译</h3>
+
+<p>Sub-agent 由 <code>SubAgent</code> TypedDict（第36–161行）定义，并编译为 <code>CompiledSubAgent</code>（第164–241行）。<code>create_sub_agent()</code>（第459行）使用 sub-agent 指定的模型、工具和中间件调用 <code>create_agent()</code>。System prompt 通过规范的 <code>prompt</code> 字段声明式注入——无需运行时重写。</p>
+
+<h3>状态共享：默认共享父级状态</h3>
+
+<p><code>task()</code> 函数（第668行）同步调用 <code>subagent.invoke(subagent_state, subagent_config)</code>（第693行）。Sub-agent 在父级的完整状态上运行，<em>除了</em> <code>_EXCLUDED_STATE_KEYS</code>（第249行）：messages、todos 和 structured_response。这意味着工具结果、文件读取和其他状态通道会自动共享——高效，但紧密耦合。例如，sub-agent 可能污染父级的文件读取缓存，或在共享状态通道中累积未绑定的工具输出。</p>
+
+<h3>GENERAL_PURPOSE_SUBAGENT 与 system prompt 注入</h3>
+
+<p>默认提供 <code>GENERAL_PURPOSE_SUBAGENT</code>（第427行）。<code>wrap_model_call()</code>（第848行）将可用的 sub-agent 类型及其描述注入 system prompt，因此父模型始终知道可以委派给哪些 sub-agent。</p>
+
+<h3>并发模型</h3>
+
+<p>DeepAgents 同步 sub-agent 本质上是顺序的——父级在 <code>subagent.invoke()</code> 上阻塞直到子级返回。由于同步 sub-agent 没有并发执行路径，因此没有显式的并发限制。隐式限制为一次 1 个。</p>
+
+<h2>DeepAgents Async —— 通过 LangGraph SDK 进行远程执行</h2>
+
+<p>在 <code>middleware/async_subagents.py:866</code>，<code>AsyncSubAgentMiddleware</code> 暴露五个用于远程 sub-agent 生命周期管理的工具：</p>
+
+<table>
+  <tr><th>工具</th><th>用途</th></tr>
+  <tr><td><code>start_async_task</code></td><td>在远程 LangGraph 部署上启动 sub-agent</td></tr>
+  <tr><td><code>check_async_task</code></td><td>轮询远程 sub-agent 的状态</td></tr>
+  <tr><td><code>update_async_task</code></td><td>修改运行中远程 sub-agent 的指令</td></tr>
+  <tr><td><code>cancel_async_task</code></td><td>终止远程 sub-agent</td></tr>
+  <tr><td><code>list_async_tasks</code></td><td>枚举所有远程 sub-agent 及其状态</td></tr>
+</table>
+
+<p>这在我们的代码库中是独一无二的：DeepAgents 异步 sub-agent 是<strong>唯一</strong>使用 LangGraph SDK 进行远程执行的 sub-agent 实现。Sub-agent 运行在独立的 LangGraph 部署上，而非父进程内。任务状态通过 <code>AsyncSubAgentState.async_tasks</code> 和 <code>_tasks_reducer</code> 跟踪。</p>
+
+<h2>DeerFlow —— 双线程池异步 sub-agent</h2>
+
+<p>DeerFlow 采取与 DeepAgents 相反的方法：完全隔离，默认异步，配备由独立的调度线程池和执行线程池支持的专用生命周期管理器。</p>
+
+<h3>SubAgentExecutor：双线程池</h3>
+
+<p>在 <code>subagents/executor.py:276</code>，<code>SubAgentExecutor</code> 管理完整的 sub-agent 生命周期。它维护两个线程池：<strong>_scheduler_pool</strong>（3 个工作线程）用于分派和状态管理，以及 <strong>_execution_pool</strong>（3 个工作线程）用于运行 sub-agent 循环。这种分离防止了调度开销与执行吞吐量之间的竞争。</p>
+
+<h3>执行路径</h3>
+
+<ul>
+  <li><strong><code>execute()</code>（第714行）：</strong> 同步入口点。检测是否存在运行中的事件循环，如有必要则使用隔离的持久化循环，防止在 FastAPI 等异步环境中发生事件循环冲突。</li>
+  <li><strong><code>execute_async()</code>（第758行）：</strong> 通过调度线程池在后台即发即忘。立即返回；父级轮询完成状态。</li>
+  <li><strong><code>_aexecute()</code>（第483行）：</strong> 核心异步实现。构建初始状态，创建 agent，通过 <code>agent.astream()</code> 流式传输，并收集 AIMessages。</li>
+</ul>
+
+<h3>SubAgentConfig 与工具控制</h3>
+
+<p>在 <code>subagents/config.py:11</code>，<code>SubAgentConfig</code> 定义：name、description、system_prompt、工具允许/禁止列表、skills、model（继承或显式指定）、max_turns（默认 50）和 timeout_seconds（默认 900 = 15 分钟）。内置 sub-agent（在 <code>builtins/__init__.py:12</code>）包括 <strong>general-purpose</strong>（除 <code>task</code> 外的所有工具）和 <strong>bash</strong>（命令专家）。</p>
+
+<h3>隔离与轮询</h3>
+
+<p>Sub-agent 图编译时设置 <code>checkpointer=False</code>——它们是一次性的，永不恢复。不与父级共享任何状态。父级以 5 秒间隔轮询完成状态。这比共享状态更安全（无缓存污染或副作用风险），但增加了延迟：最坏情况下，父级在 sub-agent 完成后等待 5 秒才能发现结果。</p>
+
+<h3>并发强制执行：SubAgentLimitMiddleware</h3>
+
+<p><code>SubAgentLimitMiddleware</code> 通过<strong>在 <code>after_model</code> 中截断多余的 <code>task</code> 工具调用</strong>，将并发 sub-agent 限制在 <code>MAX_CONCURRENT_SUBAGENTS</code>（默认 3）以内。这是一种激进的强制执行策略：如果模型请求 5 个 sub-agent 而限制为 3，则后 2 个工具调用会被静默丢弃。模型永远不会知道这些 sub-agent 未能 spawn——它必须从未出现的结果中推断。</p>
+
+<h2>DeepAgents 与 DeerFlow：状态共享 vs 隔离</h2>
+
+<div class="callout">
+  <strong>"DeepAgents 信任 sub-agent；DeerFlow 不信任它。"</strong><br>
+  这是两种设计之间的决定性权衡。DeepAgents 同步 sub-agent 共享父级的状态图（除了 messages、todos、structured_response）。工具结果、文件读取和其他通道在父子之间自动流动——无需序列化，无需轮询。但行为不当的 sub-agent 可能损坏共享状态。DeerFlow 将每个 sub-agent 图编译为 checkpointer=False，不共享任何内容。Sub-agent 是一个黑盒：输入进去，结果在轮询后出来。更安全，但你必须为必须在任务描述中显式传递的每一字节上下文付出代价。
+</div>
+
+<p>并发模型反映了相同的哲学分化。DeepAgents 同步 sub-agent 是顺序的——父级阻塞，因此并发甚至不成问题。DeerFlow 拥抱并行，但通过 <code>SubAgentLimitMiddleware</code> 以 3 个并发 sub-agent 防御，通过<em>截断</em> <code>after_model</code> 中的工具调用来强制执行。DeepAgents 异步 sub-agent 通过委托给远程 LangGraph 部署完全避开了本地并发问题——这是我们集合中唯一这样做的代码库。</p>
+
 <h2>对比表格</h2>
 
 <table>
@@ -264,6 +340,8 @@ interface SpawnAcpParams {
   <tr><td><strong>nanobot</strong></td><td>asyncio.Task</td><td>消息总线注入</td><td>max_concurrent_subagents</td><td>事件循环协作</td><td>subagent_result 事件</td><td>隐式（通过 spawn）</td></tr>
   <tr><td><strong>opencode</strong></td><td>子会话（sessions.create）</td><td>派生的权限规则集</td><td>Foreground + Background</td><td>每会话上下文窗口</td><td>会话结果</td><td>可配置</td></tr>
   <tr><td><strong>openclaw</strong></td><td>ACP spawn</td><td>ACP channel 隔离</td><td>24 个 ACP channel</td><td>每 agent model + thinking 配置</td><td>Channel 订阅</td><td>是（ACP 路由）</td></tr>
+  <tr><td><strong>deepagents</strong></td><td>进程内（LangGraph 状态）</td><td>共享状态（排除 messages、todos、structured_response）</td><td>顺序（sync）/ 通过 LangGraph SDK 远程（async）</td><td>每 sub-agent 规范（model、tools、middleware）</td><td>返回值（sync）/ 通过 check_async_task 轮询（async）</td><td>是（task 工具）</td></tr>
+  <tr><td><strong>deerflow</strong></td><td>双线程池（调度 + 执行）</td><td>完全隔离（checkpointer=False，无状态共享）</td><td>MAX_CONCURRENT_SUBAGENTS=3（截断）</td><td>每 sub-agent：max_turns（50）、timeout_seconds（900）</td><td>轮询（5 秒间隔）</td><td>是（general-purpose 有 task 工具）</td></tr>
 </table>
 
 <h2>设计启发</h2>
@@ -323,11 +401,29 @@ interface SpawnAcpParams {
     <div class="option" data-q="4" data-a="d">web_search、web_fetch、browse</div>
   </div>
   <div class="feedback" id="feedback4"></div>
+
+  <div class="question">Q5. 哪个代码库的异步 sub-agent 使用 LangGraph SDK 进行远程执行——这是我们集合中独一无二的特性？</div>
+  <div class="options">
+    <div class="option" data-q="5" data-a="a">DeepAgents</div>
+    <div class="option" data-q="5" data-a="b">DeerFlow</div>
+    <div class="option" data-q="5" data-a="c">Nanobot</div>
+    <div class="option" data-q="5" data-a="d">OpenClaw</div>
+  </div>
+  <div class="feedback" id="feedback5"></div>
+
+  <div class="question">Q6. DeerFlow 的 SubAgentLimitMiddleware 如何强制执行 MAX_CONCURRENT_SUBAGENTS 限制？</div>
+  <div class="options">
+    <div class="option" data-q="6" data-a="a">将多余的 sub-agent 请求排队等待后续执行</div>
+    <div class="option" data-q="6" data-a="b">在 after_model 中截断多余的 task 工具调用</div>
+    <div class="option" data-q="6" data-a="c">向父模型返回错误消息</div>
+    <div class="option" data-q="6" data-a="d">动态扩展线程池以容纳</div>
+  </div>
+  <div class="feedback" id="feedback6"></div>
 </div>
 
 <script>
 (function() {
-  var answers = { 1: 'c', 2: 'b', 3: 'b', 4: 'b' };
+  var answers = { 1: 'c', 2: 'b', 3: 'b', 4: 'b', 5: 'a', 6: 'b' };
   document.querySelectorAll('.option').forEach(function(opt) {
     opt.addEventListener('click', function() {
       var q = this.dataset.q;
@@ -366,6 +462,8 @@ interface SpawnAcpParams {
   <li><strong>nanobot</strong>：<code>nanobot/agent/subagent.py:74</code>（SubagentManager.spawn）、<code>_announce_result()</code>、<code>SubagentStatus</code> dataclass</li>
   <li><strong>opencode</strong>：<code>packages/opencode/src/tool/task.ts</code>（TaskTool）、<code>packages/opencode/src/agent/subagent-permissions.ts</code>（派生权限）</li>
   <li><strong>openclaw</strong>：<code>src/agents/acp-spawn.ts</code>（SpawnAcpParams）、ACP channel 路由</li>
+  <li><strong>deepagents</strong>：<code>middleware/subagents.py:734</code>（SubAgentMiddleware）、<code>middleware/subagents.py:528</code>（_build_task_tool）、<code>middleware/subagents.py:668</code>（task 函数）、<code>middleware/subagents.py:36-241</code>（SubAgent TypedDict、CompiledSubAgent）、<code>middleware/subagents.py:459</code>（create_sub_agent）、<code>middleware/subagents.py:848</code>（wrap_model_call）、<code>middleware/async_subagents.py:866</code>（AsyncSubAgentMiddleware）</li>
+  <li><strong>deerflow</strong>：<code>subagents/executor.py:276</code>（SubAgentExecutor）、<code>subagents/executor.py:714</code>（execute）、<code>subagents/executor.py:758</code>（execute_async）、<code>subagents/executor.py:483</code>（_aexecute）、<code>subagents/config.py:11</code>（SubAgentConfig）、<code>builtins/__init__.py:12</code>（内置 sub-agent）、SubAgentLimitMiddleware（并发强制执行）</li>
 </ol>
 
 <h2>推荐下一步阅读</h2>
@@ -374,6 +472,8 @@ interface SpawnAcpParams {
   <li>如果你想要<strong>最干净的预算模型</strong>：阅读 <code>hermes-agent/agent/iteration_budget.py</code> —— 每子级迭代上限是整个集合中最简单、最有效的护栏。</li>
   <li>如果你想要<strong>最强的隔离</strong>：研究 <code>pi-mono/packages/coding-agent/examples/extensions/subagent/index.ts</code> —— 带有 JSONL 流式输出的 child_process.spawn 是可移植的、可调试的，且由操作系统强制执行。</li>
   <li>如果你想要<strong>最实用</strong>的模式：<code>claude-code/src/tools/AgentTool/runAgent.ts</code> —— sync/async/fork 三位一体覆盖了绝大多数现实世界中的委派需求。</li>
+  <li>如果你想理解<strong>状态共享的权衡</strong>：对比 <code>deepagents/middleware/subagents.py:668</code>（同步，共享父级状态）与 <code>deerflow/subagents/executor.py:483</code>（异步，checkpointer=False，完全隔离）。这两种设计代表了信任谱系的相反两端。</li>
+  <li>如果你想要<strong>唯一的远程执行 sub-agent 模型</strong>：追踪 <code>deepagents/middleware/async_subagents.py:866</code> —— 基于 LangGraph SDK 的远程 sub-agent，通过五个专用工具实现完整的生命周期管理。</li>
 </ul>
 
 <div class="callout">

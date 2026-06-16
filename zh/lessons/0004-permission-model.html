@@ -22,8 +22,8 @@
 </nav>
 
 <h1>第4课：权限模型</h1>
-<p class="subtitle">从"完全信任 LLM"到"什么也不信任" — 七个 agent 代码库如何决定一个工具能做什么、不能做什么。</p>
-<p class="meta">2026年6月 · 7个主要源代码库 · <a href="0004-permission-model.html">永久链接</a></p>
+<p class="subtitle">从"完全信任 LLM"到"什么也不信任" — 九个 agent 代码库如何决定一个工具能做什么、不能做什么。</p>
+<p class="meta">2026年6月 · 9个主要源代码库 · <a href="0004-permission-model.html">永久链接</a></p>
 
 <p class="sidenote">AI agent 中的权限模型回答两个问题：<strong>LLM 能请求这个工具吗？</strong>以及<strong>harness 能安全执行它吗？</strong>这是两个不同的问题，代码库在生命周期的不同时间点给出答案。钩子、ACL 和沙箱之间的区别在于检查<em>何时</em>发生以及<em>谁</em>来执行。</p>
 
@@ -36,19 +36,20 @@
 <div class="spectrum">
   <span class="left">无权限</span>
   <span class="bar"></span>
-  <span class="right">完全沙箱化</span>
+  <span class="right">完全 OS 沙箱化</span>
 </div>
 
 <ol>
   <li><strong>无权限：</strong> nanobot、hermes-agent — 工具无条件运行。任何守卫（check_fn、SSRF 检测）是可用性或安全网，而非安全边界。</li>
   <li><strong>基于钩子的委托：</strong> pi-mono、openclaw — 框架提供一个 <code>beforeToolCall</code> 钩子；调用者实现其想要的任何权限逻辑。框架本身是中立的。</li>
-  <li><strong>ACL（访问控制列表）：</strong> claude-code、opencode — 每个工具有一个权限级别（allow、ask、deny）。规则在注册时（LLM 能看到什么）和执行时（实际运行什么）评估。</li>
-  <li><strong>完全沙箱化：</strong> codex — OS 内核强制边界。工具在 Landlock、Windows 沙箱或 macOS 沙箱内运行。沙箱可以在重试时升级。</li>
+  <li><strong>传统 ACL（访问控制列表）：</strong> claude-code、opencode、DeepAgents — 每个工具或操作有一个权限级别（allow、ask、deny）。规则在注册时（LLM 能看到什么）和执行时（实际运行什么）评估。</li>
+  <li><strong>结构性沙箱：</strong> DeerFlow — 由虚拟路径白名单、文件大小上限和路径遍历检测定义的硬边界。安全来自运行时架构，而非用户配置的权限规则。</li>
+  <li><strong>完全 OS 沙箱化：</strong> codex — OS 内核强制边界。工具在 Landlock、Windows 沙箱或 macOS 沙箱内运行。沙箱可以在重试时升级。</li>
 </ol>
 
 <h2>Claude Code — 权限钩子 + ACL</h2>
 
-<p>Claude Code 拥有七个代码库中最完善的 ACL 系统。权限检查是每个工具上一等的生命周期方法。</p>
+<p>Claude Code 拥有九个代码库中最完善的 ACL 系统。权限检查是每个工具上一等的生命周期方法。</p>
 
 <h3>逐工具权限检查</h3>
 
@@ -140,6 +141,27 @@ buildTool({
 
 <p>两个工具在子 agent 中默认 deny：<code>todowrite</code> 和 <code>task</code>。<code>Wildcard.match</code> 实用工具用于工具名称的 deny 规则匹配，支持 glob 模式，以便单条规则可以覆盖工具族（例如 <code>mcp__*</code> 拒绝所有 MCP 工具）。</p>
 
+<h2>DeepAgents — 工具操作级别的传统 ACL</h2>
+
+<p>DeepAgents（来自 LangChain）实现了一个在单个工具操作级别运行的权限模型 — 每个文件系统的读取、写入、编辑或 shell 命令都独立地根据配置的权限规则进行检查。与 Claude Code 和 opencode 在工具名称级别检查权限不同，DeepAgents 在<em>操作作用于路径</em>的级别检查权限。</p>
+
+<h3>FilesystemPermission：逐操作、逐路径的粒度</h3>
+
+<p>核心权限类是 <code>FilesystemPermission</code>，定义在 <code>middleware/filesystem.py:90-123</code>。每个权限条目指定一个<strong>操作类型</strong>（read、write、edit 等）、一个<strong>路径模式</strong>和一个<strong>行为</strong>：ALLOW、DENY 或 ASK。这些检查嵌入在每个工具实现内部（例如第 962、1154、1221、1315 行）— 意味着权限检查存在于工具本身中，而非单独的中间件层。权限通过 <code>permissions</code> 参数传递给 <code>create_deep_agent()</code>。</p>
+
+<pre><code># DeepAgents: middleware/filesystem.py:90-123 — 逐操作权限模型
+# FilesystemPermission(operation, path_pattern, behavior)
+#   operation: "read" | "write" | "edit" | ...
+#   path_pattern: glob 或特定路径
+#   behavior: ALLOW | DENY | ASK
+#
+# 在每个工具实现内部内联检查（第 962、1154、1221、1315 行）
+# 通过 `permissions` 参数传递给 create_deep_agent()</code></pre>
+
+<h3>通过 LangGraph 中断实现人机协作</h3>
+
+<p>DeepAgents 通过 LangGraph 的中断/恢复机制支持人机协作审批。<code>interrupt_on</code> 配置指定哪些条件应暂停执行并等待人工审核 — 当工具调用匹配 <code>interrupt_on</code> 规则时，agent 暂停并等待显式批准后再继续。这通过 <code>langchain.agents</code> 中的 <code>HumanInTheLoopMiddleware</code> 暴露，提供可配置的中断触发器。该权限模型是传统且显式的：<em>每个路径上的每个操作都有配置的行为</em>，使其成为与 Claude Code 和 opencode 相同的 allow/deny/ask 范式，但以更细粒度执行。</p>
+
 <h2>Pi-mono、OpenClaw — 基于钩子的委托</h2>
 
 <p>pi-mono 和 openclaw 都不自带内置权限系统。相反，框架在 <code>agent-loop.ts</code> 中公开一个 <code>beforeToolCall</code> 钩子。调用者 — 嵌入 agent 框架的应用程序 — 通过提供钩子函数来实现权限检查。</p>
@@ -179,17 +201,80 @@ class ToolEntry:
 
 <p>这些被归类为<strong>递进提示</strong>，而非权限拒绝。LLM 被轻推而非被阻止 — 一个与基于 ACL 或基于沙箱的方法根本不同的哲学。</p>
 
+<h2>DeerFlow — 沙箱边界的结构性安全</h2>
+
+<p>DeerFlow 没有实现传统 ACL 意义上的权限模型。相反，它采用<strong>结构性安全</strong>方法：定义 agent 可以访问什么的硬边界，并在任何工具运行之前在沙箱级别强制执行这些边界。它不是 ACL，也不是像 Codex 那样的 OS 级沙箱化 — 它介于两者之间。</p>
+
+<h3>沙箱边界：虚拟路径，而非权限规则</h3>
+
+<p>DeerFlow 不问"这个操作是否被允许？"，而是问"这个路径在沙箱内吗？"沙箱强制一个虚拟路径白名单 — 只有 <code>/mnt/user-data/*</code>、<code>/mnt/skills/*</code>、<code>/mnt/acp-workspace/*</code> 以及显式配置的挂载可访问。路径遍历攻击由 <code>sandbox/tools.py:626</code> 中的 <code>_reject_path_traversal</code> 检测并拒绝。</p>
+
+<pre><code># DeerFlow: sandbox/tools.py — 结构性沙箱边界
+# _reject_path_traversal(path) — 阻止 "../"、符号链接逃逸等
+# 虚拟路径白名单：
+#   /mnt/user-data/*
+#   /mnt/skills/*
+#   /mnt/acp-workspace/*
+#   + 显式配置的挂载
+# 当 LocalSandboxProvider 活跃时，默认禁用宿主机 bash
+# 80KB write_file 大小上限（可通过 DEERFLOW_WRITE_FILE_MAX_BYTES 配置）
+# 对相同路径的文件操作加锁以串行化</code></pre>
+
+<h3>硬资源上限与安全特性</h3>
+
+<p>DeerFlow 强制执行多项结构性限制，作为安全屏障：</p>
+<ul>
+  <li><strong>写入文件大小上限：</strong> 每次 <code>write_file</code> 调用最大 80KB（可通过 <code>DEERFLOW_WRITE_FILE_MAX_BYTES</code> 配置）。大文件写入在结构上不可能 — 没有可绕过的权限检查。</li>
+  <li><strong>宿主机 bash 已禁用：</strong> 当 <code>LocalSandboxProvider</code> 活跃时，宿主机 bash 执行默认禁用（<code>is_host_bash_allowed</code>）。agent 无法通过 shell 访问逃逸沙箱。</li>
+  <li><strong>文件操作锁：</strong> 相同路径的文件操作通过锁进行串行化，防止并发工具调用相互干扰的竞态条件。</li>
+  <li><strong>技能归档扫描：</strong> 加载技能归档时，DeerFlow 运行安全检查：路径遍历检测、符号链接跳过、zip 炸弹大小限制和内容扫描。</li>
+</ul>
+
+<h3>GuardrailMiddleware：可插拔的工具调用前授权</h3>
+
+<p>DeerFlow 的 <code>GuardrailMiddleware</code> 提供了一个可插拔的授权层，在工具<em>执行前</em>评估每个工具调用。当 guardrail 拒绝工具调用时，中间件返回一个错误 <code>ToolMessage</code> 而不是执行工具。存在三种提供者选项：</p>
+<ul>
+  <li><strong>AllowlistProvider</strong>（内置）：对允许的工具名称进行简单的白名单匹配。</li>
+  <li><strong>OAP 策略提供者</strong>（例如 <code>aport-agent-guardrails</code>）：根据组织规则评估工具调用的外部策略引擎。</li>
+  <li><strong>自定义提供者</strong>：任何实现 <code>GuardrailProvider</code> 协议的实现。</li>
+</ul>
+
+<h3>SandboxAuditMiddleware：安全日志记录</h3>
+
+<p><code>SandboxAuditMiddleware</code> 在每个沙箱化的 shell 和文件操作继续执行之前对其进行安全日志审计。这提供了 agent 尝试了什么的审计追踪，即使对于最终被阻止的操作也是如此 — 这是纯 ACL 系统通常缺乏的能力。</p>
+
+<h2>DeepAgents vs. DeerFlow：解决同一问题的两种根本不同的方法</h2>
+
+<p>这两个代码库代表了安全空间内设计光谱的两端。DeepAgents 拥有<strong>传统权限模型</strong>（对操作进行 allow/deny/ask），而 DeerFlow 拥有<strong>结构性安全模型</strong>（沙箱边界 + 虚拟路径 + 大小上限）。它们是解决约束 agent 能做什么这一同一问题的两种根本不同的方法。</p>
+
+<table>
+  <tr><th>维度</th><th>DeepAgents（传统 ACL）</th><th>DeerFlow（结构性安全）</th></tr>
+  <tr><td><strong>安全范式</strong></td><td>权限模型 — 针对每个操作的用户配置规则</td><td>结构性模型 — 运行时架构中的硬边界</td></tr>
+  <tr><td><strong>执行层级</strong></td><td>工具操作级别（每个读/写/编辑单独检查）</td><td>沙箱边界级别（路径白名单、遍历检测、大小上限）</td></tr>
+  <tr><td><strong>核心问题</strong></td><td>"应该允许对这个路径进行这个操作吗？"</td><td>"这个路径在沙箱内吗？这个操作在结构上可能吗？"</td></tr>
+  <tr><td><strong>粒度</strong></td><td>逐操作、逐路径（ALLOW/DENY/ASK）</td><td>逐沙箱（虚拟路径白名单 + 大小上限 + 宿主机 bash 开关）</td></tr>
+  <tr><td><strong>人工审批</strong></td><td>LangGraph 中断/恢复（HumanInTheLoopMiddleware）</td><td>GuardrailMiddleware（AllowlistProvider / OAP 策略 / 自定义）</td></tr>
+  <tr><td><strong>审计</strong></td><td>通过中断追踪隐式实现</td><td>通过 SandboxAuditMiddleware 显式实现</td></tr>
+  <tr><td><strong>绕过风险</strong></td><td>权限配置错误（错误的路径模式或遗漏的规则）</td><td>沙箱逃逸（路径遍历、宿主机 bash 泄露）— 由 _reject_path_traversal 和宿主机 bash 开关缓解</td></tr>
+  <tr><td><strong>适用场景</strong></td><td>当你需要细粒度、面向用户的权限控制时（例如"允许读取 docs/ 但在写入 src/ 之前询问"）</td><td>当你需要以最少配置实现硬边界时（例如"agent 只能触碰 /mnt/user-data，就这样"）</td></tr>
+</table>
+
+<div class="callout">
+  <strong>关键洞察：</strong> DeepAgents 在每个操作之前询问 LLM 的所有者"我可以这样做吗？" — 权限存在于<em>用户与 agent 之间的关系</em>中。DeerFlow 筑起墙壁使某些操作在结构上不可能 — 安全存在于<em>运行时的架构</em>中。两者并非孰优孰劣；它们解决不同的威胁模型。有 shell 访问权限的 agent 需要 DeerFlow 式的边界。在已知仓库中进行代码审查的 agent 则受益于 DeepAgents 式的粒度。
+</div>
+
 <h2>对比总表</h2>
 
 <table>
-  <tr><th>维度</th><th>claude-code</th><th>codex</th><th>opencode</th><th>pi-mono</th><th>openclaw</th><th>hermes-agent</th><th>nanobot</th></tr>
-  <tr><td><strong>审批模型</strong></td><td>ACL（allow/ask/deny）</td><td>沙箱 + 审批</td><td>ACL（Effect-TS）</td><td>钩子（消费者）</td><td>钩子（消费者）</td><td>无（check_fn）</td><td>无（SSRF 提示）</td></tr>
-  <tr><td><strong>沙箱化</strong></td><td>无</td><td>Landlock / Win / Mac + 提升重试</td><td>无</td><td>无</td><td>无</td><td>无</td><td>无</td></tr>
-  <tr><td><strong>权限持久化</strong></td><td>会话 / 项目 / 用户</td><td>每会话</td><td>每会话（派生）</td><td>由消费者定义</td><td>由消费者定义</td><td>不适用</td><td>不适用</td></tr>
-  <tr><td><strong>防护</strong></td><td>Deny 规则，--dangerously-bypass-permissions</td><td>OS 内核强制</td><td>子 agent 中默认 deny task/todowrite</td><td>beforeToolCall 钩子</td><td>beforeToolCall 钩子</td><td>check_fn（可用性）</td><td>SSRF + workspace 边界</td></tr>
-  <tr><td><strong>检查时机</strong></td><td>注册时 + 执行时</td><td>执行时（预检查）</td><td>物化时 + 执行时</td><td>执行时（钩子）</td><td>执行时（钩子）</td><td>注册时（可用性）</td><td>执行时（内联）</td></tr>
-  <tr><td><strong>Deny 时的回退</strong></td><td>用户提示</td><td>提升沙箱并重试</td><td>向 LLM 返回错误结果</td><td>向 LLM 返回错误结果</td><td>向 LLM 返回错误结果</td><td>工具静默排除</td><td>向 LLM 递进提示</td></tr>
-  <tr><td><strong>独特之处</strong></td><td>三级作用域持久化</td><td>重试时沙箱提升</td><td>物化时过滤</td><td>框架零意见</td><td>钩子 + 进度流</td><td>基于 AST 的工具发现</td><td>runner 中 SSRF 检测</td></tr>
+  <tr><th>维度</th><th>claude-code</th><th>codex</th><th>opencode</th><th>deepagents</th><th>deerflow</th><th>pi-mono</th><th>openclaw</th><th>hermes-agent</th><th>nanobot</th></tr>
+  <tr><td><strong>审批模型</strong></td><td>ACL（allow/ask/deny）</td><td>OS 沙箱 + 审批</td><td>ACL（Effect-TS）</td><td>ACL（逐操作、逐路径）</td><td>结构性（虚拟路径、大小上限）</td><td>钩子（消费者）</td><td>钩子（消费者）</td><td>无（check_fn）</td><td>无（SSRF 提示）</td></tr>
+  <tr><td><strong>沙箱化</strong></td><td>无</td><td>Landlock / Win / Mac + 提升重试</td><td>无</td><td>无</td><td>虚拟路径白名单、遍历检测、bash 开关</td><td>无</td><td>无</td><td>无</td><td>无</td></tr>
+  <tr><td><strong>权限持久化</strong></td><td>会话 / 项目 / 用户</td><td>每会话</td><td>每会话（派生）</td><td>每 agent（permissions 参数）</td><td>每沙箱配置</td><td>由消费者定义</td><td>由消费者定义</td><td>不适用</td><td>不适用</td></tr>
+  <tr><td><strong>防护/防御</strong></td><td>Deny 规则，--dangerously-bypass-permissions</td><td>OS 内核强制</td><td>子 agent 中默认 deny task/todowrite</td><td>FilesystemPermission、interrupt_on、HumanInTheLoopMiddleware</td><td>GuardrailMiddleware、_reject_path_traversal、80KB 写入上限、归档扫描</td><td>beforeToolCall 钩子</td><td>beforeToolCall 钩子</td><td>check_fn（可用性）</td><td>SSRF + workspace 边界</td></tr>
+  <tr><td><strong>检查时机</strong></td><td>注册时 + 执行时</td><td>执行时（预检查）</td><td>物化时 + 执行时</td><td>执行时（工具实现内联）</td><td>执行时（预检查中间件）</td><td>执行时（钩子）</td><td>执行时（钩子）</td><td>注册时（可用性）</td><td>执行时（内联）</td></tr>
+  <tr><td><strong>Deny 时的回退</strong></td><td>用户提示</td><td>提升沙箱并重试</td><td>向 LLM 返回错误结果</td><td>LangGraph 中断（等待人工）</td><td>向 LLM 返回错误 ToolMessage</td><td>向 LLM 返回错误结果</td><td>向 LLM 返回错误结果</td><td>工具静默排除</td><td>向 LLM 递进提示</td></tr>
+  <tr><td><strong>审计追踪</strong></td><td>无（仅权限决定）</td><td>无（内核强制）</td><td>无</td><td>隐式（中断追踪）</td><td>显式（SandboxAuditMiddleware）</td><td>无</td><td>无</td><td>无</td><td>无</td></tr>
+  <tr><td><strong>独特之处</strong></td><td>三级作用域持久化</td><td>重试时 OS 沙箱提升</td><td>物化时过滤</td><td>逐操作（而非逐工具）ACL 粒度</td><td>结构性墙壁，而非权限规则</td><td>框架零意见</td><td>钩子 + 进度流</td><td>基于 AST 的工具发现</td><td>runner 中 SSRF 检测</td></tr>
 </table>
 
 <h2>核心权衡：安全 vs. 复杂度</h2>
@@ -200,8 +285,10 @@ class ToolEntry:
 
 <p><strong>更少安全基础设施 = 更简单的代码，但用户（或嵌入应用程序）承担所有风险。</strong> Pi-mono 的基于钩子的方法在框架中有零行权限代码。那是优雅的 — 直到 LLM 运行 <code>rm -rf /</code> 而没有人连接钩子。</p>
 
+<p>在这两个极端之间，<strong>DeepAgents 和 DeerFlow 阐明了一个更深层的设计选择</strong>：你是将安全构建为一组用户配置的规则（DeepAgents 的逐操作 ACL），还是构建为无法被配置移除的硬架构边界（DeerFlow 的虚拟路径白名单和大小上限）？答案取决于你的部署模型 — 多租户平台倾向于结构性边界，而单用户工具则受益于细粒度权限规则。</p>
+
 <div class="callout">
-  <strong>设计启发：</strong> 在<em>注册/物化时</em>的权限检查防止 LLM 请求它不能做的事情。在<em>执行时</em>的权限检查保护 harness 免受 LLM 做不该做的事。最强的系统（claude-code、opencode、codex）两者都做。最弱的（hermes-agent、nanobot）两者都不做 — 它们用可用性守门或用提示轻推，信任 LLM 会守规矩。根据你的威胁模型选择光谱上的位置：如果 LLM 能访问 shell，执行时强制不是可选项。
+  <strong>设计启发：</strong> 在<em>注册/物化时</em>的权限检查防止 LLM 请求它不能做的事情。在<em>执行时</em>的权限检查保护 harness 免受 LLM 做不该做的事。最强的系统（claude-code、opencode、codex）两者都做。DeepAgents 仅做执行时（工具实现中内联）。DeerFlow 做执行时结构性强制（路径白名单 + 遍历拒绝 + GuardrailMiddleware）。最弱的（hermes-agent、nanobot）两者都不做 — 它们用可用性守门或用提示轻推，信任 LLM 会守规矩。根据你的威胁模型选择光谱上的位置：如果 LLM 能访问 shell，执行时强制不是可选项。
 </div>
 
 <h2>练习：识别权限模型</h2>
@@ -213,8 +300,8 @@ class ToolEntry:
   <div class="options">
     <div class="option" data-q="1" data-a="a">claude-code</div>
     <div class="option" data-q="1" data-a="b">codex</div>
-    <div class="option" data-q="1" data-a="c">opencode</div>
-    <div class="option" data-q="1" data-a="d">pi-mono</div>
+    <div class="option" data-q="1" data-a="c">DeerFlow</div>
+    <div class="option" data-q="1" data-a="d">DeepAgents</div>
   </div>
   <div class="feedback" id="feedback1"></div>
 
@@ -235,11 +322,29 @@ class ToolEntry:
     <div class="option" data-q="3" data-a="d">校验工具输入 schema</div>
   </div>
   <div class="feedback" id="feedback3"></div>
+
+  <div class="question">Q4. DeepAgents 的权限模型与 DeerFlow 的安全模型在本质上有何区别？</div>
+  <div class="options">
+    <div class="option" data-q="4" data-a="a">DeepAgents 使用 LangGraph，DeerFlow 不使用</div>
+    <div class="option" data-q="4" data-a="b">DeepAgents 拥有传统的逐操作 ACL（allow/deny/ask），而 DeerFlow 拥有结构性沙箱边界（虚拟路径、文件大小上限）</div>
+    <div class="option" data-q="4" data-a="c">DeepAgents 用 Python 编写，DeerFlow 不是</div>
+    <div class="option" data-q="4" data-a="d">DeerFlow 只能在 Docker 容器中运行</div>
+  </div>
+  <div class="feedback" id="feedback4"></div>
+
+  <div class="question">Q5. 在 DeerFlow 中，什么机制在工具执行前评估工具调用，并可以在拒绝时返回错误 ToolMessage？</div>
+  <div class="options">
+    <div class="option" data-q="5" data-a="a">SandboxAuditMiddleware</div>
+    <div class="option" data-q="5" data-a="b">_reject_path_traversal</div>
+    <div class="option" data-q="5" data-a="c">GuardrailMiddleware</div>
+    <div class="option" data-q="5" data-a="d">LocalSandboxProvider</div>
+  </div>
+  <div class="feedback" id="feedback5"></div>
 </div>
 
 <script>
 (function() {
-  var answers = { 1: 'b', 2: 'b', 3: 'b' };
+  var answers = { 1: 'b', 2: 'b', 3: 'b', 4: 'b', 5: 'c' };
   document.querySelectorAll('.option').forEach(function(opt) {
     opt.addEventListener('click', function() {
       var q = this.dataset.q;
@@ -266,6 +371,8 @@ class ToolEntry:
   <li><strong>MCP 工具权限继承</strong> — 来自 MCP 服务器的外部工具如何继承会话的权限上下文（claude-code 的 assembleToolPool 相关<a href="0004-permission-model.html">在此</a>）</li>
   <li><strong>权限 UI / 用户提示</strong> — 询问用户"允许此工具吗？"的 TUI/CLI 提示 — 见<a href="0007-ui-transport.html">第7课</a></li>
   <li><strong>工具执行沙箱内部机制</strong> — Landlock 规则构造以及平台特定沙箱 API — 见<a href="0002-tool-system.html">第2课</a></li>
+  <li><strong>LangGraph 中断/恢复生命周期</strong> — DeepAgents 的 HumanInTheLoopMiddleware 如何与 LangGraph 的状态机集成以暂停和恢复 agent 执行 — 将在未来关于 agent 编排框架的课程中涵盖</li>
+  <li><strong>DeerFlow 完整的沙箱提供者架构</strong> — LocalSandboxProvider、基于容器的隔离以及技能归档安全扫描管道 — 将在未来关于部署与隔离的课程中涵盖</li>
 </ul>
 
 <h2>主要源码出处</h2>
@@ -273,6 +380,8 @@ class ToolEntry:
   <li><strong>claude-code</strong>：<code>src/Tool.ts</code>（checkPermissions，buildTool 默认值），<code>src/tools.ts:271</code>（getTools），<code>:263</code>（filterToolsByDenyRules），<code>:345</code>（assembleToolPool）</li>
   <li><strong>codex</strong>：<code>codex-rs/core/src/tools/orchestrator.rs</code>（ToolOrchestrator 管道），<code>codex-rs/core/src/tools/parallel.rs</code>（ToolCallRuntime）</li>
   <li><strong>opencode</strong>：<code>packages/opencode/src/agent/subagent-permissions.ts</code>（deriveSubagentSessionPermission），<code>packages/core/src/tool/tool.ts</code>（withPermission），<code>packages/core/src/tool/registry.ts</code>（物化时过滤）</li>
+  <li><strong>deepagents</strong>：<code>middleware/filesystem.py:90-123</code>（FilesystemPermission 类 — 逐操作/逐路径 ALLOW/DENY/ASK），第 962、1154、1221、1315 行的内联检查，<code>HumanInTheLoopMiddleware</code>（LangGraph 中断/恢复集成）</li>
+  <li><strong>deerflow</strong>：<code>sandbox/tools.py:626</code>（_reject_path_traversal），虚拟路径白名单强制，<code>GuardrailMiddleware</code>（可插拔 GuardrailProvider 协议），<code>SandboxAuditMiddleware</code>，80KB 写入上限（<code>DEERFLOW_WRITE_FILE_MAX_BYTES</code>），宿主机 bash 开关（<code>is_host_bash_allowed</code>）</li>
   <li><strong>pi-mono</strong>：<code>packages/agent/src/agent-loop.ts</code>（beforeToolCall 钩子）</li>
   <li><strong>openclaw</strong>：<code>packages/agent-core/src/agent-loop.ts</code>（beforeToolCall 钩子，相同模式）</li>
   <li><strong>hermes-agent</strong>：<code>tools/registry.py:77</code>（ToolEntry.check_fn，max_result_size_chars）</li>
@@ -283,7 +392,9 @@ class ToolEntry:
 <ul>
   <li>如果你想了解<strong>最复杂</strong>的权限系统：追踪 <code>codex/codex-rs/core/src/tools/orchestrator.rs</code> — 审批 → 沙箱 → 执行 → 重试管道是任何开源 agent 中最完整的安全架构。</li>
   <li>如果你想了解<strong>最实用</strong>的 ACL 模式：阅读 <code>claude-code/src/tools.ts</code> — 三过滤器管道（上下文 → deny 规则 → 合并）干净且可直接应用于新的 agent 框架。</li>
+  <li>如果你想了解<strong>最细粒度</strong>的 ACL：研究 <code>deepagents/middleware/filesystem.py</code> — 在每个工具调用点进行内联强制执行的逐操作、逐路径权限检查。</li>
   <li>如果你想了解<strong>最优雅</strong>的类型级方法：研究 <code>opencode/packages/core/src/tool/registry.ts</code> — 物化时过滤意味着类型系统阻止 LLM 看见被 deny 的工具。</li>
+  <li>如果你想了解<strong>结构性沙箱</strong>作为 ACL 的替代方案：追踪 <code>deerflow/sandbox/tools.py</code> — 虚拟路径白名单、遍历拒绝和大小上限共同构成一个无需用户配置权限规则的安全模型。</li>
 </ul>
 
 <div class="callout">

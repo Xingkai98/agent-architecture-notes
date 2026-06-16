@@ -23,8 +23,8 @@
 </nav>
 
 <h1>Lesson 0005: Memory Architecture</h1>
-<p class="subtitle">Working, short-term, long-term — the three memory tiers that every agent must manage, and how seven codebases do it (or don't).</p>
-<p class="meta">June 2026 · 7 primary source codebases · <a href="0005-memory-architecture.html">Permalink</a></p>
+<p class="subtitle">Working, short-term, long-term — the three memory tiers that every agent must manage, and how nine codebases do it (or don't).</p>
+<p class="meta">June 2026 · 9 primary source codebases · <a href="0005-memory-architecture.html">Permalink</a></p>
 
 <p class="sidenote">Memory is what separates a stateless API call from an agent that <em>learns and improves over time</em>. Every agent faces the same fundamental problem: the LLM context window is finite, but conversations, files, and experiences are unbounded. The solution is always a tiered architecture — but the implementations range from full 3-layer orchestration to "we just dump JSONL and call it a day."</p>
 
@@ -157,7 +157,7 @@ class MemoryStore:
     self.history_jsonl = root_dir / "history.jsonl" # consolidated log
     self.cursor        = 0                          # last consolidated position</code></pre>
 
-<p>The <strong>SOUL.md</strong> file is unique among all 7 codebases — it defines the agent's personality and behavioral constraints, separate from factual memory (MEMORY.md) and user preferences (USER.md). This tripartite split (identity, facts, preferences) is a clean separation that other codebases conflate into fewer files.</p>
+<p>The <strong>SOUL.md</strong> file is unique among all 9 codebases — it defines the agent's personality and behavioral constraints, separate from factual memory (MEMORY.md) and user preferences (USER.md). This tripartite split (identity, facts, preferences) is a clean separation that other codebases conflate into fewer files.</p>
 
 <h3>Consolidator: incremental LLM summarization</h3>
 
@@ -221,16 +221,114 @@ pub struct MemoryStore {
 
 <p>OpenCode's <code>packages/app/src/utils/persist.ts</code> persists UI state to localStorage — things like panel widths, sort order, and filter preferences. There is no agent memory system at all. The persistence is purely for the human-facing UI, not for the agent's knowledge. This is consistent with OpenCode's positioning as a lightweight coding assistant rather than a persistent agent.</p>
 
+<h2>Memory as Middleware: DeepAgents and DeerFlow</h2>
+
+<p>Two codebases stand out for a unifying architectural decision: they make memory a <strong>first-class middleware concern</strong> rather than an ad-hoc feature bolted onto the agent loop. Both DeepAgents and DeerFlow implement memory as middleware that intercepts the request/response pipeline — memory loads before the LLM call, extracts after, and never blocks the main loop.</p>
+
+<p>This is the key architectural pattern: when memory is middleware, it is <em>guaranteed to run on every turn</em> by construction. When memory is ad-hoc code in the agent loop, it is easy to skip, forget, or bypass. Middleware enforces memory hygiene by design — you cannot accidentally omit a prefetch or skip a consolidation because the middleware layer runs unconditionally.</p>
+
+<div class="callout">
+  <strong>"Memory that lives in the agent loop is optional. Memory that lives in middleware is mandatory."</strong> The architectural choice between embedding memory logic in the agent's turn function versus registering it as middleware determines whether memory is a first-class concern or an afterthought. DeepAgents and DeerFlow both chose middleware, and both have richer memory systems as a result.
+</div>
+
+<h2>DeepAgents: Tiered storage via CompositeBackend</h2>
+
+<p>DeepAgents takes a backend-abstraction approach to memory. Instead of a single storage layer, it defines a <strong>CompositeBackend</strong> that routes memory operations by namespace prefix to three specialized backends — each with a different persistence guarantee and lifecycle.</p>
+
+<h3>Three backends, one router</h3>
+
+<p>The <code>CompositeBackend</code> at <code>backends/composite.py</code> acts as a URL-like router for memory operations, dispatching by namespace prefix:</p>
+
+<pre><code># backends/composite.py — prefix-based routing to three backends
+class CompositeBackend:
+  def route(self, namespace):
+    prefix = namespace[0] if namespace else ""
+    if prefix == "memories":
+      return self.store_backend     # cross-session, persistent
+    elif prefix == "data":
+      return self.filesystem_backend # disk-backed, durable
+    else:
+      return self.state_backend      # thread-internal, ephemeral</code></pre>
+
+<p>The three backends serve distinct purposes:</p>
+
+<ul>
+  <li><strong>StateBackend</strong> (<code>backends/state.py:38</code>): Thread-internal, temporary storage using LangGraph state channels. Data persists within a thread via LangGraph checkpoints but is invisible to other threads. Best for: conversation-scratch data, in-flight computation results that don't need to cross session boundaries.</li>
+  <li><strong>StoreBackend</strong> (<code>backends/store.py:172</code>): Cross-session persistent storage via LangGraph's BaseStore, namespace-isolated. Supports two encoding formats: v1 (list of strings) and v2 (string + encoded fields for richer metadata). Best for: facts, preferences, learned knowledge that must survive session boundaries.</li>
+  <li><strong>FilesystemBackend</strong>: Disk-backed storage for large or human-readable data. Best for: files, documents, any artifact the user might want to inspect or edit directly.</li>
+</ul>
+
+<p>This namespace-prefix routing is a clean architectural pattern: the caller specifies intent via namespace, and the CompositeBackend transparently routes to the correct storage tier. No if-else chains scattered across the codebase, no magic constants — just namespace-driven dispatch with clear ownership.</p>
+
+<h3>MemoryMiddleware: AGENTS.md injection</h3>
+
+<p>The <code>MemoryMiddleware</code> at <code>middleware/memory.py:180-441</code> handles memory injection into the agent context. In <code>before_agent()</code> (line 303), it loads <code>AGENTS.md</code> files via the configured backend. These are then injected into the system prompt in <code>modify_request()</code> (line 371) as <code>&lt;agent_memory&gt;...&lt;/agent_memory&gt;</code> XML tags. The load happens exactly once per session — DeepAgents treats AGENTS.md as session-stable context, not something that needs re-reading on every turn.</p>
+
+<h2>DeerFlow: The full memory lifecycle</h2>
+
+<p>DeerFlow arguably has the most sophisticated memory system of all nine codebases. It implements the complete memory lifecycle: <strong>detect &rarr; queue &rarr; extract &rarr; write &rarr; inject</strong>, with every step backed by LLM-driven intelligence rather than heuristics.</p>
+
+<h3>Memory structure: context, history, and confidence-scored facts</h3>
+
+<p>The memory model at <code>agents/memory/storage.py:24</code> organizes knowledge into three layers:</p>
+
+<pre><code># agents/memory/storage.py:24 — Memory structure
+{
+  "context": {
+    "workContext": "...",       # user's professional context
+    "personalContext": "...",   # personal interests, preferences
+    "topOfMind": "..."          # what's currently relevant
+  },
+  "history": {
+    "recentMonths": "...",      # compressed recent history
+    "earlierContext": "...",    # older, more summarized
+    "longTermBackground": "..." # foundational, rarely-changing
+  },
+  "facts": [
+    {
+      "id": "uuid",
+      "content": "fact text",
+      "category": "...",
+      "confidence": 0.85,       # 0–1 confidence score
+      "createdAt": "iso8601",
+      "source": "which turn produced this fact"
+    }
+  ]
+}</code></pre>
+
+<p>Each fact carries a <strong>confidence score</strong> (0–1). This is the critical design decision: high-confidence facts are injected aggressively; low-confidence facts are held back or pruned. Confidence-based pruning means the memory system self-cleans — facts that were never reinforced naturally fade away, without any cron job or manual curation.</p>
+
+<h3>Storage: per-user JSON with mtime caching</h3>
+
+<p><code>FileMemoryStorage</code> at <code>agents/memory/storage.py:62</code> stores memory as a single JSON file per user at <code>{base_dir}/users/{user_id}/memory.json</code>, or per-agent at <code>users/{user_id}/agents/{agent_name}/memory.json</code>. The file is cached in memory with <strong>mtime invalidation</strong> — if the file's modification time changes, the cache is refreshed. This is safe for single-writer scenarios and avoids the complexity of a database while still being durable.</p>
+
+<h3>Memory extraction pipeline: detect, queue, extract, inject</h3>
+
+<ol>
+  <li><strong>Detection</strong> (<code>agents/middlewares/memory_middleware.py:28</code>): The <code>MemoryMiddleware</code> filters the conversation stream to <em>user inputs + final AI responses only</em> — no intermediate tool calls, no thinking traces. It detects correction and reinforcement signals (e.g., "actually, I meant..." or "remember that...") as triggers for immediate memory updates.</li>
+  <li><strong>Queueing</strong> (<code>agents/memory/queue.py:28</code>): The <code>MemoryUpdateQueue</code> provides per-thread deduplication with a configurable debounce (default 30s). Background processing uses <code>threading.Timer</code>, capturing the user_id at enqueue time. Rapid-fire messages don't trigger redundant extraction runs — the queue coalesces them.</li>
+  <li><strong>Extraction</strong> (<code>agents/memory/updater.py:380</code>): The <code>MemoryUpdater</code> is LLM-driven. <code>update_memory()</code> (line 539) is the synchronous path, offloaded to a thread pool when in an async context. <code>_apply_updates()</code> (line 600) handles context changes, fact add/remove, and confidence-based pruning. The LLM decides what is a fact, what category, and what confidence — no regex, no keyword matching.</li>
+  <li><strong>Injection</strong>: Via <code>DynamicContextMiddleware</code>, the top 15 facts plus context are injected into <code>&lt;memory&gt;</code> tags in the system prompt, budgeted by token counting (tiktoken or char-based fallback) with a <code>max_injection_tokens</code> cap at 2,000 by default.</li>
+</ol>
+
+<h3>Why DeerFlow's design is notable</h3>
+
+<p>The confidence-based fact model with automatic pruning means DeerFlow's memory self-maintains. Low-confidence facts that are never reinforced get pruned; high-confidence facts that accumulate supporting evidence persist. This is the only system among all nine codebases that treats memory confidence as a first-class dimension with automatic lifecycle consequences — hermes-agent's curator manages skill lifecycle (time-based), but DeerFlow manages fact lifecycle (evidence-based).</p>
+
+<p>The debounced queue with deduplication is also unique. Other codebases either run consolidation on every turn (hermes-agent) or on a fixed cooldown (Codex). DeerFlow's debounce is adaptive — it only runs extraction when the conversation has settled, reducing LLM costs without losing information.</p>
+
 <h2>Comparative table</h2>
 
 <table>
-  <tr><th>Dimension</th><th>hermes-agent</th><th>claude-code</th><th>nanobot</th><th>codex</th><th>pi-mono</th><th>openclaw</th><th>opencode</th></tr>
+  <tr><th>Dimension</th><th>hermes-agent</th><th>claude-code</th><th>nanobot</th><th>codex</th><th>deepagents</th><th>deerflow</th><th>pi-mono</th><th>openclaw</th><th>opencode</th></tr>
   <tr>
     <td><strong>Working memory</strong></td>
     <td>Injected system prompt block</td>
     <td>4-tier CLAUDE.md merge</td>
     <td>MEMORY.md + USER.md + SOUL.md</td>
     <td>In-context goal state</td>
+    <td>AGENTS.md via &lt;agent_memory&gt; XML</td>
+    <td>Top 15 facts via &lt;memory&gt; tags</td>
     <td>None (array of messages)</td>
     <td>None (array of messages)</td>
     <td>None (chat only)</td>
@@ -241,6 +339,8 @@ pub struct MemoryStore {
     <td>Session markdown notes</td>
     <td>history.jsonl (cursor-based)</td>
     <td>State DB + Logs DB</td>
+    <td>StateBackend (per-thread, checkpointed)</td>
+    <td>Per-user JSON (mtime-cached)</td>
     <td>JSONL session dump</td>
     <td>JSONL session dump</td>
     <td>None</td>
@@ -251,6 +351,8 @@ pub struct MemoryStore {
     <td>MEMORY.md (~/.claude/memdir)</td>
     <td>MEMORY.md + SOUL.md (Git-backed)</td>
     <td>memories_1.sqlite</td>
+    <td>StoreBackend (BaseStore) + FilesystemBackend</td>
+    <td>FileMemoryStorage (per-user JSON)</td>
     <td>None</td>
     <td>Optional SDK (SQLite + embeddings)</td>
     <td>None</td>
@@ -261,6 +363,8 @@ pub struct MemoryStore {
     <td>Forked subagent, threshold-gated</td>
     <td>Incremental LLM summarization</td>
     <td>2-stage: thread + global (6h cooldown)</td>
+    <td>None (one-time AGENTS.md load per session)</td>
+    <td>LLM-driven extraction + confidence pruning + debounced queue (30s)</td>
     <td>None</td>
     <td>Not by default</td>
     <td>None</td>
@@ -274,6 +378,8 @@ pub struct MemoryStore {
     <td>None</td>
     <td>None</td>
     <td>None</td>
+    <td>None</td>
+    <td>None</td>
   </tr>
   <tr>
     <td><strong>Search</strong></td>
@@ -281,6 +387,8 @@ pub struct MemoryStore {
     <td>File glob + grep</td>
     <td>Cursor-based incremental</td>
     <td>SQL queries</td>
+    <td>Namespace-routed backend queries</td>
+    <td>JSON field access (no full-text index)</td>
     <td>None</td>
     <td>Embeddings (optional)</td>
     <td>None</td>
@@ -291,6 +399,8 @@ pub struct MemoryStore {
     <td>4-tier CLAUDE.md merge</td>
     <td>SOUL.md identity file + Git versioning</td>
     <td>4-DB separation + cooldown gating</td>
+    <td>3-backend CompositeBackend with prefix routing</td>
+    <td>Confidence-scored facts with auto-pruning + debounced queue</td>
     <td>Zero-memory design</td>
     <td>Opt-in SDK architecture</td>
     <td>UI-only persistence</td>
@@ -317,6 +427,10 @@ pub struct MemoryStore {
 
 <div class="callout">
   <strong>"Safe cut points matter for coherence."</strong> Nanobot's consolidator only splits at user-turn boundaries. Codex separates thread-local from global consolidation. Both recognize that arbitrary truncation produces incoherent summaries. A cut point must respect conversational structure.
+</div>
+
+<div class="callout">
+  <strong>"Memory as middleware — guaranteed execution on every turn."</strong> Both DeepAgents and DeerFlow make memory a first-class middleware concern. When memory is middleware, it runs on every turn by construction — you cannot accidentally skip a prefetch or forget consolidation. When memory is ad-hoc code in the agent loop, it's easy to bypass. The architectural position of memory code (middleware layer vs. turn function body) directly determines how reliable the memory system is.
 </div>
 
 <h2>Why pi-mono has no memory</h2>
@@ -374,11 +488,38 @@ pub struct MemoryStore {
     <div class="option" data-q="5" data-a="d">Manual trigger only</div>
   </div>
   <div class="feedback" id="feedback5"></div>
+
+  <div class="question">Q6. Which codebase uses a CompositeBackend that routes memory operations by namespace prefix to three specialized backends (State/Store/Filesystem)?</div>
+  <div class="options">
+    <div class="option" data-q="6" data-a="a">hermes-agent</div>
+    <div class="option" data-q="6" data-a="b">deepagents</div>
+    <div class="option" data-q="6" data-a="c">deerflow</div>
+    <div class="option" data-q="6" data-a="d">codex</div>
+  </div>
+  <div class="feedback" id="feedback6"></div>
+
+  <div class="question">Q7. Which codebase implements confidence-scored facts (0–1) with automatic pruning — where low-confidence facts that are never reinforced naturally fade away?</div>
+  <div class="options">
+    <div class="option" data-q="7" data-a="a">hermes-agent</div>
+    <div class="option" data-q="7" data-a="b">nanobot</div>
+    <div class="option" data-q="7" data-a="c">deerflow</div>
+    <div class="option" data-q="7" data-a="d">deepagents</div>
+  </div>
+  <div class="feedback" id="feedback7"></div>
+
+  <div class="question">Q8. Which two codebases make memory a first-class middleware concern, guaranteeing memory operations run on every turn by construction?</div>
+  <div class="options">
+    <div class="option" data-q="8" data-a="a">hermes-agent + codex</div>
+    <div class="option" data-q="8" data-a="b">deepagents + deerflow</div>
+    <div class="option" data-q="8" data-a="c">claude-code + nanobot</div>
+    <div class="option" data-q="8" data-a="d">pi-mono + openclaw</div>
+  </div>
+  <div class="feedback" id="feedback8"></div>
 </div>
 
 <script>
 (function() {
-  var answers = { 1: 'c', 2: 'b', 3: 'c', 4: 'c', 5: 'c' };
+  var answers = { 1: 'c', 2: 'b', 3: 'c', 4: 'c', 5: 'c', 6: 'b', 7: 'c', 8: 'b' };
   document.querySelectorAll('.option').forEach(function(opt) {
     opt.addEventListener('click', function() {
       var q = this.dataset.q;
@@ -402,7 +543,7 @@ pub struct MemoryStore {
 
 <h2>What we haven't covered</h2>
 <ul>
-  <li><strong>Vector embeddings for semantic memory search</strong> — openclaw's optional SDK supports this, but it's not used by default. Semantic search over memories is a growing area but only openclaw ships the capability.</li>
+  <li><strong>Vector embeddings for semantic memory search</strong> — openclaw's optional SDK supports this; DeerFlow uses tiktoken-based token counting for injection budgeting but not embeddings for retrieval. Semantic search over memories is a growing area.</li>
   <li><strong>Memory across multi-agent systems</strong> — how memories are shared or partitioned when multiple agents collaborate. Covered in <a href="0008-multi-agent.html">Lesson 0008</a>.</li>
   <li><strong>Memory eviction from context</strong> — once a memory is injected into working memory, when does it get removed? Covered in <a href="0003-context-management.html">Lesson 0003</a>.</li>
 </ul>
@@ -413,6 +554,8 @@ pub struct MemoryStore {
   <li><strong>claude-code</strong>: <code>src/utils/claudemd.ts</code> (4-tier CLAUDE.md loader), <code>src/memdir/</code> (MEMORY.md system), <code>src/services/SessionMemory/sessionMemory.ts</code> (session notes), consolidation subagent (forked process, threshold-gated)</li>
   <li><strong>nanobot</strong>: <code>nanobot/agent/memory.py:40</code> (MemoryStore), <code>:602</code> (Consolidator), <code>nanobot/autocompact.py:17</code> (AutoCompact), GitStore (SOUL.md, USER.md, MEMORY.md versioning)</li>
   <li><strong>codex</strong>: <code>codex-rs/state/src/runtime/memories.rs:28</code> (MemoryStore), 4 SQLite databases (state, logs, goals, memories_1.sqlite), 2-stage extraction (thread + global, 6h cooldown)</li>
+  <li><strong>deepagents</strong>: <code>middleware/memory.py:180-441</code> (MemoryMiddleware), <code>backends/composite.py</code> (CompositeBackend), <code>backends/state.py:38</code> (StateBackend), <code>backends/store.py:172</code> (StoreBackend), FilesystemBackend</li>
+  <li><strong>deerflow</strong>: <code>agents/memory/storage.py:24</code> (memory structure), <code>:62</code> (FileMemoryStorage), <code>agents/memory/updater.py:380</code> (MemoryUpdater), <code>:539</code> (update_memory), <code>:600</code> (_apply_updates), <code>agents/memory/queue.py:28</code> (MemoryUpdateQueue), <code>agents/middlewares/memory_middleware.py:28</code> (MemoryMiddleware)</li>
   <li><strong>pi-mono</strong>: JSONL session files only — no MEMORY.md, no consolidation, no skill learning, no cross-session memory</li>
   <li><strong>openclaw</strong>: Memory Host SDK (SQLite + optional embeddings) — available but not used by default</li>
   <li><strong>opencode</strong>: <code>packages/app/src/utils/persist.ts</code> — localStorage for UI state only, no agent memory system</li>
@@ -421,6 +564,8 @@ pub struct MemoryStore {
 <h2>Recommended next reading</h2>
 <ul>
   <li>If you want the <strong>most sophisticated</strong> memory system: trace <code>hermes-agent/agent/memory_manager.py</code> and <code>hermes_state.py</code> — the prefetch-inject-sync pipeline with FTS5 is the gold standard.</li>
+  <li>If you want the <strong>most complete memory lifecycle</strong>: study <code>deerflow/agents/memory/</code> — the detect-queue-extract-inject pipeline with confidence-scored facts and debounced queueing is the most comprehensive of all nine codebases.</li>
+  <li>If you want a <strong>clean tiered-storage architecture</strong>: read <code>deepagents/backends/composite.py</code> and <code>backends/store.py</code> — the CompositeBackend with namespace-prefix routing to three backends is an elegant pattern for separating storage concerns.</li>
   <li>If you want the <strong>most practical</strong> pattern: read <code>nanobot/nanobot/agent/memory.py</code> — the Consolidator with cursor-based incremental summarization is clean, testable, and easy to adopt.</li>
   <li>If you want the <strong>simplest that works</strong>: study Claude Code's <code>src/memdir/</code> — file-based MEMORY.md with @include directives and size limits is minimal and battle-tested.</li>
 </ul>

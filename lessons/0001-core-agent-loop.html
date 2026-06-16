@@ -72,13 +72,13 @@
 
 <h1>Lesson 0001: The Core Agent Loop</h1>
 <p class="subtitle">Think, act, observe, repeat — the fundamental architecture of every AI agent.</p>
-<p class="meta">June 2026 · 8 primary sources · <a href="0001-core-loop.html">Permalink</a></p>
+<p class="meta">June 2026 · 10 primary sources · <a href="0001-core-loop.html">Permalink</a></p>
 
 <p>Open any agent codebase. The first question to ask is: <em>where is the loop?</em> Every agent — whether it runs in a terminal, a Slack channel, or a Docker container — is built around a single architectural center of gravity: the execution loop that cycles between calling the LLM, running tools, and feeding results back.</p>
 
 <p class="sidenote">CoALA (Sumers et al., 2023) was the first paper to formalize this as a cognitive architecture: a generalized decision loop with modular memory stores and a structured action space. Read it at <a href="https://arxiv.org/abs/2309.02427">arXiv:2309.02427</a>.</p>
 
-<p>This lesson maps that loop across seven production agent codebases — four coding agents (claude-code, codex, opencode, pi-mono) and three general agents (hermes-agent, openclaw, nanobot). We'll see two fundamental architectures emerge, and understand the tradeoffs that push teams toward one or the other.</p>
+<p>This lesson maps that loop across nine production agent codebases — four coding agents (claude-code, codex, opencode, pi-mono) and five general agents (hermes-agent, openclaw, nanobot, deepagents, deer-flow). We'll see two fundamental architectures emerge, a third variant, and a fourth paradigm that challenges the very idea of writing your own loop. Understanding the tradeoffs will help you choose an architecture when building your own agent system.</p>
 
 <h2>The universal skeleton</h2>
 
@@ -112,7 +112,7 @@
 
 <p>This is the ReAct pattern (Yao et al., 2022) — interleaved reasoning and action. The LLM reasons about what to do, the agent executes it, and the result is fed back for the next round of reasoning. Nothing more.</p>
 
-<p>But look closer at seven real implementations, and this simple loop fractures into two fundamentally different architectures.</p>
+<p>But look closer at nine real implementations, and this simple loop fractures into several fundamentally different architectures — including one that isn't a loop at all.</p>
 
 <h2>The two architectures</h2>
 
@@ -189,6 +189,42 @@ while (true) {
 
 <p>Used by: <strong>opencode</strong>. Uses Effect-TS fibers rather than raw async/await. The <code>run()</code> function is an <code>Effect.fn</code> generator with a <code>for (let step = 0; step &lt; MAX_STEPS; step++)</code> loop inside a <code>while (openActivity)</code> outer guard.</p>
 
+<h3>Architecture D: Delegated Graph Execution</h3>
+
+<p>Used by: <strong>deepagents, deer-flow</strong>. Neither implements a while-loop, a state machine, or any custom iteration logic. Instead, both delegate execution entirely to <strong>LangGraph's Pregel runtime</strong> — they are "graph compilers," not loop implementers.</p>
+
+<div class="diagram">
+// deepagents: libs/deepagents/deepagents/graph.py, create_deep_agent() → create_agent()
+// deer-flow:  backend/.../agents/lead_agent/agent.py, _make_lead_agent() → create_agent()
+//
+// Both call LangChain's create_agent(), which compiles a StateGraph.
+// The graph has two nodes — "model" and "tools" — connected by conditional edges:
+//
+//   [model] ──(has tool_calls?)──▶ [tools] ──(always)──▶ [model]
+//      │                                                    │
+//      └──(no tool_calls)──▶ END                            │
+//
+// This is NOT a while-loop. It's a compiled graph executed by LangGraph's
+// Pregel engine — each "superstep" plans nodes → executes in parallel →
+// applies writes to channels → repeats until terminal state.
+
+agent = create_agent(          // Returns CompiledStateGraph (extends Pregel)
+  model=chat_model,
+  tools=assembled_tools,
+  middleware=middleware_chain,  // The real architecture is here
+  state_schema=ThreadState,
+)
+# Runtime executes: agent.astream(input, config=config, stream_mode="values")
+</div>
+
+<p><strong>Why this design?</strong> By not writing their own loop, deepagents and deer-flow inherit LangGraph's entire runtime machinery for free: checkpoint-based persistence, 8 streaming modes, interrupt/resume for human-in-the-loop, Pregel's parallel node execution, and a battle-tested state management system (channels with reducers). The cost is opacity — when something goes wrong in the execution, the stack trace passes through LangGraph's <code>PregelLoop._tick()</code> → <code>prepare_next_tasks()</code> → <code>_apply_writes()</code> chain, which is harder to debug than a simple while-loop.</p>
+
+<p>The architectural contribution of these two codebases is not the loop itself, but <strong>how they assemble the graph before compilation</strong>. Both use a <strong>middleware stack</strong> — an ordered chain of interceptors that each contribute tools, modify the system prompt, and wrap model/tool calls. The middleware stack IS the architecture. We'll study this pattern in detail across subsequent lessons, particularly <a href="0002-tool-system.html">Lesson 0002</a> and <a href="0003-context-management.html">Lesson 0003</a>.</p>
+
+<p class="sidenote">This is the bridge to Course 2 (LangChain/LangGraph infra). Once you understand that deepagents and deer-flow compile to a StateGraph, the next question is: what does the Pregel runtime actually do? We'll cover that in the infra course.</p>
+
+<p>This adds a critical dimension to our comparative table: <strong>who owns the loop?</strong> In architectures A, B, and the state machine variant, the codebase authors own it. In Architecture D, LangGraph owns it — and the framework authors focus on middleware composition instead.</p>
+
 <h2>Comparative table</h2>
 
 <table>
@@ -201,6 +237,8 @@ while (true) {
     <th>nanobot</th>
     <th>codex</th>
     <th>opencode</th>
+    <th>deepagents</th>
+    <th>deer-flow</th>
   </tr>
   <tr>
     <td><strong>Loop architecture</strong></td>
@@ -211,6 +249,8 @@ while (true) {
     <td>State machine + for-loop</td>
     <td>4-layer nested</td>
     <td>Outer while + inner for</td>
+    <td>Delegated graph</td>
+    <td>Delegated graph</td>
   </tr>
   <tr>
     <td><strong>Loop nesting</strong></td>
@@ -221,6 +261,8 @@ while (true) {
     <td>3 levels</td>
     <td>4 levels</td>
     <td>2 levels</td>
+    <td>0 (LangGraph owns it)</td>
+    <td>0 (LangGraph owns it)</td>
   </tr>
   <tr>
     <td><strong>State management</strong></td>
@@ -231,6 +273,8 @@ while (true) {
     <td>AgentRunSpec ctx</td>
     <td>Immutable history clone</td>
     <td>Durable DB + fibers</td>
+    <td>LangGraph channels + checkpoint</td>
+    <td>LangGraph channels + checkpoint</td>
   </tr>
   <tr>
     <td><strong>Tool timing</strong></td>
@@ -241,6 +285,8 @@ while (true) {
     <td>After stream</td>
     <td>During stream</td>
     <td>Both (configurable)</td>
+    <td>After stream</td>
+    <td>After stream</td>
   </tr>
   <tr>
     <td><strong>Concurrency</strong></td>
@@ -251,6 +297,8 @@ while (true) {
     <td>asyncio + tasks</td>
     <td>Tokio async</td>
     <td>Effect-TS fibers</td>
+    <td>LangGraph Pregel (async)</td>
+    <td>LangGraph Pregel (async)</td>
   </tr>
   <tr>
     <td><strong>Max iterations</strong></td>
@@ -261,6 +309,8 @@ while (true) {
     <td>max_iterations</td>
     <td>Unbounded (input-driven)</td>
     <td>MAX_STEPS (25)</td>
+    <td>LangGraph default (9999)</td>
+    <td>LangGraph default (9999)</td>
   </tr>
   <tr>
     <td><strong>Recovery complexity</strong></td>
@@ -271,6 +321,8 @@ while (true) {
     <td>Medium</td>
     <td>Medium</td>
     <td>Low (Effect recovery)</td>
+    <td>Medium (middleware-driven)</td>
+    <td>High (11+ middleware chain)</td>
   </tr>
   <tr>
     <td><strong>Primary source</strong></td>
@@ -281,6 +333,8 @@ while (true) {
     <td><code>loop.py:867</code></td>
     <td><code>turn.rs:137</code></td>
     <td><code>llm.ts:373</code></td>
+    <td><code>graph.py:236→844</code></td>
+    <td><code>agent.py:409→520</code></td>
   </tr>
 </table>
 
@@ -341,11 +395,20 @@ while (true) {
     <div class="option" data-q="3" data-a="d">sampling loop</div>
   </div>
   <div class="feedback" id="feedback3"></div>
+
+  <div class="question">Q4. DeepAgents and DeerFlow do NOT implement their own while-loop. What owns the execution loop instead?</div>
+  <div class="options">
+    <div class="option" data-q="4" data-a="a">asyncio event loop</div>
+    <div class="option" data-q="4" data-a="b">LangGraph's Pregel runtime</div>
+    <div class="option" data-q="4" data-a="c">FastAPI middleware</div>
+    <div class="option" data-q="4" data-a="d">Docker container runtime</div>
+  </div>
+  <div class="feedback" id="feedback4"></div>
 </div>
 
 <script>
 (function() {
-  const answers = { 1: 'b', 2: 'c', 3: 'c' };
+  const answers = { 1: 'b', 2: 'c', 3: 'c', 4: 'b' };
   document.querySelectorAll('.option').forEach(opt => {
     opt.addEventListener('click', function() {
       const q = this.dataset.q;
@@ -375,6 +438,7 @@ while (true) {
   <li><strong>Context composition and compaction</strong> — how the system prompt and message history are built and managed (<a href="0003-context-management.html">Lesson 0003</a>)</li>
   <li><strong>Permission and safety</strong> — what the agent is allowed to do (<a href="0004-permission-model.html">Lesson 0004</a>)</li>
   <li><strong>Sub-agent spawning</strong> — how the loop changes when work is delegated (<a href="0006-subagents.html">Lesson 0006</a>)</li>
+  <li><strong>The middleware stack</strong> — how deepagents and deer-flow compose agent behavior without owning the loop itself (Lessons 0002–0008)</li>
 </ul>
 
 <h2>Primary sources</h2>
@@ -388,6 +452,8 @@ while (true) {
   <li><strong>nanobot</strong>: <a href="https://github.com/HKUDS/nanobot/blob/main/nanobot/agent/loop.py#L867"><code>loop.py</code> — <code>AgentLoop.run()</code> (line 867)</a></li>
   <li><strong>codex</strong>: <a href="https://github.com/openai/codex/blob/main/codex-rs/core/src/session/turn.rs#L137"><code>turn.rs</code> — <code>run_turn()</code> (line 137)</a></li>
   <li><strong>opencode</strong>: <a href="https://github.com/anomalyco/opencode/blob/main/packages/core/src/session/runner/llm.ts#L373"><code>llm.ts</code> — <code>run()</code> (line 373)</a></li>
+  <li><strong>deepagents</strong>: <a href="https://github.com/langchain-ai/deepagents/blob/main/libs/deepagents/deepagents/graph.py#L236"><code>graph.py</code> — <code>create_deep_agent()</code> (line 236)</a>, delegates to LangChain's <code>create_agent()</code> at line 844. No custom loop — graph is compiled and handed to LangGraph's Pregel runtime.</li>
+  <li><strong>deer-flow</strong>: <a href="https://github.com/bytedance/deer-flow/blob/main/backend/packages/harness/deerflow/agents/lead_agent/agent.py#L409"><code>agent.py</code> — <code>_make_lead_agent()</code> (line 409)</a>, calls <code>create_agent()</code> at line 520. Runtime execution via <code>agent.astream()</code> in <a href="https://github.com/bytedance/deer-flow/blob/main/backend/packages/harness/deerflow/runtime/runs/worker.py#L312"><code>worker.py</code> — <code>run_agent()</code> (line 312)</a>.</li>
   <li><strong>CoALA paper</strong>: <a href="https://arxiv.org/abs/2309.02427">Sumers et al., "Cognitive Architectures for Language Agents" (2023)</a></li>
   <li><strong>ReAct paper</strong>: <a href="https://arxiv.org/abs/2210.03629">Yao et al., "ReAct: Synergizing Reasoning and Acting in Language Models" (2022)</a></li>
 </ol>
@@ -398,6 +464,7 @@ while (true) {
   <li>If you want the <strong>minimal</strong> version: <code>pi-mono/packages/agent/src/agent-loop.ts</code> — the entire runLoop() is ~115 lines, and it's the cleanest expression of the nested two-loop architecture.</li>
   <li>If you want the <strong>most sophisticated</strong> version: <code>claude-code/src/query.ts</code> — the queryLoop() is ~1,500 lines and shows every recovery path, budget check, and streaming optimization that a production agent needs.</li>
   <li>If you want the <strong>different paradigm</strong> version: <code>nanobot/nanobot/agent/loop.py</code> — the explicit state machine is a refreshing alternative to raw loops.</li>
+  <li>If you want to understand the <strong>delegated graph</strong> paradigm: <code>deepagents/libs/deepagents/deepagents/graph.py</code> — <code>create_deep_agent()</code> shows how a middleware stack assembles into a LangGraph StateGraph, with the Pregel runtime owning the actual execution loop.</li>
 </ul>
 
 <div class="callout">

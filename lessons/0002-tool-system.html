@@ -23,11 +23,11 @@
 
 <h1>Lesson 0002: Tool System</h1>
 <p class="subtitle">Define, register, dispatch, normalize — the four stages every agent tool passes through.</p>
-<p class="meta">June 2026 · 7 primary source codebases · <a href="0002-tool-system.html">Permalink</a></p>
+<p class="meta">June 2026 · 9 primary source codebases · <a href="0002-tool-system.html">Permalink</a></p>
 
 <p class="sidenote">Every tool in every agent goes through exactly four stages: it must be <strong>defined</strong> (so the LLM knows its schema), <strong>registered</strong> (so the harness can find it), <strong>dispatched</strong> (so it actually runs), and <strong>normalized</strong> (so results feed back into the conversation). The differences between codebases are all in <em>how</em> they implement these four stages.</p>
 
-<p>In <a href="0001-core-agent-loop.html">Lesson 0001</a>, we saw that every agent is built around a loop. This lesson zooms into the inner engine of that loop: <em>how tools work</em>. We'll trace all four stages across all seven codebases, and identify the three fundamental design philosophies that divide them.</p>
+<p>In <a href="0001-core-agent-loop.html">Lesson 0001</a>, we saw that every agent is built around a loop. This lesson zooms into the inner engine of that loop: <em>how tools work</em>. We'll trace all four stages across all nine codebases, and identify the four fundamental design philosophies that divide them.</p>
 
 <h2>The four stages</h2>
 
@@ -43,9 +43,9 @@
 └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
 </div>
 
-<h2>Three design philosophies</h2>
+<h2>Four design philosophies</h2>
 
-<p>Across the seven codebases, three distinct philosophies emerge:</p>
+<p>Across the nine codebases, four distinct philosophies emerge:</p>
 
 <div class="spectrum">
   <span class="left">Maximally minimal</span>
@@ -57,6 +57,7 @@
   <li><strong>Minimalist:</strong> pi-mono, openclaw, nanobot. Tools are simple objects with an execute function. No central registry or discovery machinery — tools live in arrays or dicts. The framework doesn't even ship with built-in tools; tools are provided by the consumer.</li>
   <li><strong>Type-safe / DI:</strong> opencode (Effect-TS). Tools are defined with runtime-validated schemas, registered via dependency injection into scoped containers, and dispatched with automatic cleanup. The type system guarantees correctness.</li>
   <li><strong>Fully orchestrated:</strong> claude-code, codex, hermes-agent. Tools go through a multi-stage pipeline: permission checks, sandbox selection, execution, retry, result normalization, and (for claude-code) UI rendering. Each stage is a separate concern with pluggable implementations.</li>
+  <li><strong>Middleware-driven:</strong> deepagents, deer-flow. Tools are not registered directly by the developer — they are <em>contributed by middleware</em>. Each middleware in the stack (Filesystem, SubAgent, Skills, MCP) exposes its own tools. The tools available to the LLM at any moment are the union of all middleware-contributed tools plus user-provided tools. This inverts the ownership model: tool lifecycle is managed by interceptors, not by a central registry. (Contrast with Lesson 0001's Architecture D — the middleware stack IS the architecture, and tool ownership follows the same pattern.)</li>
 </ol>
 
 <h2>Stage 1: Define — how tools describe themselves</h2>
@@ -161,6 +162,16 @@ pub trait CoreToolRuntime: Send + Sync {
 
 <p><strong>DI + Scope (opencode):</strong> <code>ToolRegistry.Service</code> in <code>registry.ts</code> uses Effect's <code>Layer</code>/<code>Scope</code> for dependency injection. Tools are registered into a scoped container and automatically cleaned up when the scope exits. The <code>materialize()</code> method snapshots definitions for the LLM.</p>
 
+<h3>Middleware-driven tools (deepagents, deer-flow)</h3>
+
+<p>A new paradigm emerges in these two codebases: tools are not declared by the developer and registered into a central list. Instead, <strong>each middleware contributes its own tools</strong>, and the final tool list is the union of all middleware contributions plus user-provided tools.</p>
+
+<p><strong>deepagents:</strong> <code>create_deep_agent()</code> in <code>graph.py:236</code> assembles a middleware stack where each middleware exposes tools: <code>TodoListMiddleware</code> → <code>write_todos</code>, <code>FilesystemMiddleware</code> → <code>ls/read_file/write_file/edit_file/glob/grep/execute</code>, <code>SubAgentMiddleware</code> → <code>task</code>. The <code>_ToolExclusionMiddleware</code> in <code>middleware/_tool_exclusion.py</code> can filter tools based on <code>HarnessProfile.excluded_tools</code>. Tool descriptions can be overridden without modifying the tool object via <code>_apply_tool_description_overrides()</code> in <code>_tools.py:30-65</code>.</p>
+
+<p><strong>deer-flow:</strong> <code>get_available_tools()</code> in <code>tools/tools.py:44</code> assembles tools in a strict priority order: config-defined tools → built-in (present_files, ask_clarification) → subagent task tool → vision tool → MCP tools (lazy-init, cache with mtime) → ACP tools → skill management. The <code>DeferredToolFilterMiddleware</code> hides MCP tool schemas from the LLM until the <code>tool_search</code> promotion triggers them — a unique "lazy tool loading" pattern that keeps context windows lean when MCP servers expose hundreds of tools.</p>
+
+<p>This middleware-driven approach inverts control: instead of a tool registry being configured then executed, tool availability itself becomes a function of the middleware stack's current state. A skill activation can add tools. A permission change can remove them. The tool system is dynamic, not static.</p>
+
 <h2>Stage 3: Dispatch — how tools are executed</h2>
 
 <h3>Execution timing</h3>
@@ -185,6 +196,8 @@ pub trait CoreToolRuntime: Send + Sync {
   <tr><td>nanobot</td><td>Sequential with <code>concurrency_safe</code> flag</td><td><code>Tool.concurrency_safe</code> / <code>Tool.exclusive</code> properties</td></tr>
   <tr><td>codex</td><td>Parallel via Tokio + FuturesOrdered</td><td><code>tool_supports_parallel()</code> gates concurrent execution</td></tr>
   <tr><td>opencode</td><td>Sequential settling via Effect fiber</td><td>Each <code>settle()</code> call is its own Effect</td></tr>
+  <tr><td>deepagents</td><td>Sequential via ToolNode</td><td>LangGraph's <code>ToolNode</code> executes tools in order; middleware can wrap via <code>wrap_tool_call</code></td></tr>
+  <tr><td>deer-flow</td><td>Sequential + concurrent batches</td><td><code>_execute_concurrent_tool_calls()</code> for safe tools; <code>SubAgentLimitMiddleware</code> caps at 3</td></tr>
 </table>
 
 <h3>Sandboxing</h3>
@@ -193,7 +206,9 @@ pub trait CoreToolRuntime: Send + Sync {
 
 <p><strong>codex:</strong> The <code>ToolOrchestrator</code> (orchestrator.rs) provides a multi-layered sandbox: Landlock (Linux), Windows sandbox, macOS sandbox, elevated/restricted token. On sandbox denial, the orchestrator can <em>retry with escalated sandboxing</em> — if a restricted sandbox blocks a file write, the tool can be retried with the elevated sandbox. Network access approval is a first-class concept with immediate and deferred modes.</p>
 
-<p>All other codebases delegate sandboxing to external mechanisms: pi-mono/openclaw use <code>beforeToolCall</code> hooks, hermes-agent uses environment-based terminals, claude-code uses permission checks on tool access (not execution sandboxing).</p>
+<p><strong>deer-flow:</strong> The second codebase with a serious sandboxing story. The <code>SandboxProvider</code> pattern in <code>sandbox/sandbox_provider.py</code> abstracts execution across Local, Docker, and AioSandbox backends. Tools see virtual paths (<code>/mnt/user-data/workspace</code>) that are translated to host paths. Sandbox tools (bash, ls, read_file, write_file, glob, grep, str_replace) go through virtual path translation (<code>validate_local_tool_path()</code>) and path traversal detection. Write size capped at 80KB. This is sandboxing as a first-class architectural dimension, not an afterthought — and it's integrated into the tool system rather than wrapped around it.</p>
+
+<p>Other codebases delegate sandboxing to external mechanisms: pi-mono/openclaw use <code>beforeToolCall</code> hooks, hermes-agent uses environment-based terminals, claude-code uses permission checks on tool access (not execution sandboxing), deepagents delegates to the backend protocol (<code>SandboxBackendProtocol</code>).</p>
 
 <h2>Stage 4: Normalize — how results feed back</h2>
 
@@ -210,15 +225,15 @@ pub trait CoreToolRuntime: Send + Sync {
 <h2>Comparative table</h2>
 
 <table>
-  <tr><th>Dimension</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th></tr>
-  <tr><td><strong>Tool count</strong></td><td>4 (app-defined)</td><td>N/A (framework)</td><td>30+</td><td>80+</td><td>~20</td><td>30+ handlers</td><td>~15</td></tr>
-  <tr><td><strong>Definition</strong></td><td>TS generic</td><td>TS generic</td><td>Zod object</td><td>JSON Schema dict</td><td>ABC + JSON Schema</td><td>Rust trait</td><td>Effect Schema</td></tr>
-  <tr><td><strong>Registry</strong></td><td>None (array)</td><td>None (array)</td><td>Flat array</td><td>Singleton + AST</td><td>Dict + pkgutil</td><td>Trait + per-turn</td><td>WeakMap + DI</td></tr>
-  <tr><td><strong>Discovery</strong></td><td>Consumer provides</td><td>Consumer provides</td><td>Feature flags</td><td>AST scan + MCP</td><td>pkgutil + plugins</td><td>Build per turn</td><td>Scope-based</td></tr>
-  <tr><td><strong>Sandboxing</strong></td><td>None (hooks)</td><td>None (hooks)</td><td>None (perms)</td><td>None (env)</td><td>None</td><td>Multi-layer + retry</td><td>None</td></tr>
-  <tr><td><strong>Concurrency</strong></td><td>Seq/Par</td><td>Seq/Par</td><td>Partitioned</td><td>Seq + async bridge</td><td>Seq + flags</td><td>Tokio parallel</td><td>Seq (Effect)</td></tr>
-  <tr><td><strong>Result handling</strong></td><td>ToolResultMessage</td><td>ToolResultMessage + progress</td><td>7+ render methods + offloading</td><td>JSON string</td><td>Raw + error string</td><td>ToolOutput trait</td><td>Schema-encoded</td></tr>
-  <tr><td><strong>Unique</strong></td><td>Hook lifecycle</td><td>Progress streaming</td><td>Per-tool UI rendering</td><td>Toolsets + TTL cache</td><td>Plugin discovery</td><td>Sandbox escalation</td><td>Scope cleanup</td></tr>
+  <tr><th>Dimension</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th><th>deepagents</th><th>deer-flow</th></tr>
+  <tr><td><strong>Tool count</strong></td><td>4 (app-defined)</td><td>N/A (framework)</td><td>30+</td><td>80+</td><td>~20</td><td>30+ handlers</td><td>~15</td><td>~10 (middleware)</td><td>~20 (assembled)</td></tr>
+  <tr><td><strong>Definition</strong></td><td>TS generic</td><td>TS generic</td><td>Zod object</td><td>JSON Schema dict</td><td>ABC + JSON Schema</td><td>Rust trait</td><td>Effect Schema</td><td>LangChain BaseTool</td><td>LangChain BaseTool</td></tr>
+  <tr><td><strong>Registry</strong></td><td>None (array)</td><td>None (array)</td><td>Flat array</td><td>Singleton + AST</td><td>Dict + pkgutil</td><td>Trait + per-turn</td><td>WeakMap + DI</td><td>Middleware stack</td><td>Priority chain + filter</td></tr>
+  <tr><td><strong>Discovery</strong></td><td>Consumer provides</td><td>Consumer provides</td><td>Feature flags</td><td>AST scan + MCP</td><td>pkgutil + plugins</td><td>Build per turn</td><td>Scope-based</td><td>Middleware contrib</td><td>Config + MCP + skills</td></tr>
+  <tr><td><strong>Sandboxing</strong></td><td>None (hooks)</td><td>None (hooks)</td><td>None (perms)</td><td>None (env)</td><td>None</td><td>Multi-layer + retry</td><td>None</td><td>Backend protocol</td><td>Provider pattern + vpaths</td></tr>
+  <tr><td><strong>Concurrency</strong></td><td>Seq/Par</td><td>Seq/Par</td><td>Partitioned</td><td>Seq + async bridge</td><td>Seq + flags</td><td>Tokio parallel</td><td>Seq (Effect)</td><td>Seq (ToolNode)</td><td>Batch seq/par</td></tr>
+  <tr><td><strong>Result handling</strong></td><td>ToolResultMessage</td><td>ToolResultMessage + progress</td><td>7+ render methods + offloading</td><td>JSON string</td><td>Raw + error string</td><td>ToolOutput trait</td><td>Schema-encoded</td><td>Middleware wrap</td><td>Middleware wrap + truncation</td></tr>
+  <tr><td><strong>Unique</strong></td><td>Hook lifecycle</td><td>Progress streaming</td><td>Per-tool UI rendering</td><td>Toolsets + TTL cache</td><td>Plugin discovery</td><td>Sandbox escalation</td><td>Scope cleanup</td><td>Description overrides</td><td>Deferred tool loading</td></tr>
 </table>
 
 <h2>The fundamental tradeoff: complexity budget</h2>
@@ -306,13 +321,17 @@ pub trait CoreToolRuntime: Send + Sync {
   <li><strong>nanobot</strong>: <code>nanobot/agent/tools/base.py:124</code> (Tool ABC), <code>registry.py:9</code> (ToolRegistry), <code>loader.py:21</code> (ToolLoader)</li>
   <li><strong>codex</strong>: <code>codex-rs/core/src/tools/registry.rs:47</code> (CoreToolRuntime), <code>orchestrator.rs</code> (ToolOrchestrator)</li>
   <li><strong>opencode</strong>: <code>packages/core/src/tool/tool.ts:20</code> (Tool.make), <code>registry.ts</code> (ToolRegistry)</li>
+  <li><strong>deepagents</strong>: <code>libs/deepagents/deepagents/middleware/filesystem.py:751</code> (FilesystemMiddleware tools), <code>middleware/subagents.py:528</code> (_build_task_tool), <code>_tools.py:30</code> (description overrides)</li>
+  <li><strong>deer-flow</strong>: <code>backend/packages/harness/deerflow/tools/tools.py:44</code> (get_available_tools — priority assembly), <code>agents/middlewares/deferred_tool_filter_middleware.py</code> (lazy MCP schema loading)</li>
 </ol>
 
 <h2>Recommended next reading</h2>
 <ul>
   <li>If you want the <strong>most sophisticated</strong> tool system: trace <code>codex/codex-rs/core/src/tools/orchestrator.rs</code> — the approval → sandbox → execute → retry pipeline.</li>
-  <li>If you want the <strong>most unique</strong> discovery mechanism: read <code>hermes-agent/tools/registry.py</code> — the AST-based tool scanning is unlike anything in the other 6 codebases.</li>
+  <li>If you want the <strong>most unique</strong> discovery mechanism: read <code>hermes-agent/tools/registry.py</code> — the AST-based tool scanning is unlike anything in the other 8 codebases.</li>
   <li>If you want the <strong>most practical</strong> pattern: <code>codex/codex-rs/core/src/tools/router.rs</code> — building a fresh router per turn with tool search is a clean, testable pattern.</li>
+  <li>If you want the <strong>middleware-driven</strong> pattern: <code>deepagents/libs/deepagents/deepagents/middleware/</code> — each file is a middleware that contributes tools. Trace FilesystemMiddleware to see how tools are defined, exposed, and wrapped.</li>
+  <li>If you want the <strong>lazy tool loading</strong> pattern: <code>deer-flow/backend/packages/harness/deerflow/agents/middlewares/deferred_tool_filter_middleware.py</code> — MCP tool schemas hidden from LLM until promoted by <code>tool_search</code>.</li>
 </ul>
 
 <div class="callout">

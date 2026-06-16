@@ -23,11 +23,11 @@
 
 <h1>第2课：工具系统 — 定义、注册、调度、规范化</h1>
 <p class="subtitle">定义、注册、调度、规范化 — 每个 agent 工具必经的四个阶段。</p>
-<p class="meta">2026年6月 · 7个主要源代码库 · <a href="0002-tool-system.html">永久链接</a></p>
+<p class="meta">2026年6月 · 9个主要源代码库 · <a href="0002-tool-system.html">永久链接</a></p>
 
 <p class="sidenote">每个 agent 中的每个工具都精确地经历四个阶段：必须被<strong>定义</strong>（让 LLM 知道其 schema）、<strong>注册</strong>（让 harness 能找到它）、<strong>调度</strong>（让它实际运行），以及<strong>规范化</strong>（让结果能反馈回对话中）。各代码库之间的差异全在于它们<em>如何</em>实现这四个阶段。</p>
 
-<p>在<a href="0001-core-agent-loop.html">第1课</a>中，我们看到每个 agent 都围绕一个循环构建。本课深入到该循环的内部引擎：<em>工具是如何工作的</em>。我们将追踪全部七个代码库中的四个阶段，并识别出划分它们的三类基本设计哲学。</p>
+<p>在<a href="0001-core-agent-loop.html">第1课</a>中，我们看到每个 agent 都围绕一个循环构建。本课深入到该循环的内部引擎：<em>工具是如何工作的</em>。我们将追踪全部九个代码库中的四个阶段，并识别出划分它们的四种基本设计哲学。</p>
 
 <h2>四个阶段</h2>
 
@@ -44,9 +44,9 @@
 └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
 </div>
 
-<h2>三类设计哲学</h2>
+<h2>四种设计哲学</h2>
 
-<p>纵观七个代码库，浮现出三种截然不同的哲学：</p>
+<p>纵观九个代码库，浮现出四种截然不同的哲学：</p>
 
 <div class="spectrum">
   <span class="left">极致简约</span>
@@ -58,6 +58,7 @@
   <li><strong>极简主义：</strong> pi-mono、openclaw、nanobot。工具是带有 execute 函数的简单对象。没有中央注册表或发现机制 — 工具存放在数组或字典中。框架本身甚至不提供内置工具；工具由使用者提供。</li>
   <li><strong>类型安全 / 依赖注入：</strong> opencode（Effect-TS）。工具使用运行时校验的 schema 定义，通过依赖注入注册到作用域容器中，调度时自动清理。类型系统保证正确性。</li>
   <li><strong>全流程编排：</strong> claude-code、codex、hermes-agent。工具经过多阶段管道：权限检查、沙箱选择、执行、重试、结果规范化，以及（claude-code 的）UI 渲染。每个阶段都是独立的关注点，具有可插拔的实现。</li>
+  <li><strong>中间件驱动：</strong> deepagents、deer-flow。工具不由开发者直接注册 — 它们<em>由中间件贡献</em>。中间件栈中的每个中间件（文件系统、子 Agent、Skills、MCP）暴露各自的工具。LLM 在任何时刻可用的工具是所有中间件贡献的工具加上用户提供的工具的并集。这翻转了所有权模型：工具生命周期由拦截器管理，而非中央注册表。（对照第1课中的架构 D — 中间件栈即是架构，工具所有权遵循相同模式。）</li>
 </ol>
 
 <h2>阶段 1：定义 — 工具如何描述自己</h2>
@@ -162,6 +163,16 @@ pub trait CoreToolRuntime: Send + Sync {
 
 <p><strong>依赖注入 + 作用域（opencode）：</strong> <code>registry.ts</code> 中的 <code>ToolRegistry.Service</code> 使用 Effect 的 <code>Layer</code>/<code>Scope</code> 进行依赖注入。工具注册到作用域容器中，在作用域退出时自动清理。<code>materialize()</code> 方法为 LLM 快照工具定义。</p>
 
+<h3>中间件驱动工具（deepagents、deer-flow）</h3>
+
+<p>这两个代码库中出现了一种新范式：工具不由开发者声明并注册到中央列表中。相反，<strong>每个中间件贡献自己的工具</strong>，最终的工具列表是所有中间件贡献加上用户提供的工具的并集。</p>
+
+<p><strong>deepagents：</strong> <code>graph.py:236</code> 中的 <code>create_deep_agent()</code> 组装一个中间件栈，每个中间件暴露工具：<code>TodoListMiddleware</code> → <code>write_todos</code>，<code>FilesystemMiddleware</code> → <code>ls/read_file/write_file/edit_file/glob/grep/execute</code>，<code>SubAgentMiddleware</code> → <code>task</code>。<code>middleware/_tool_exclusion.py</code> 中的 <code>_ToolExclusionMiddleware</code> 可根据 <code>HarnessProfile.excluded_tools</code> 过滤工具。工具描述可以在不修改工具对象的情况下覆盖，通过 <code>_tools.py:30-65</code> 中的 <code>_apply_tool_description_overrides()</code> 实现。</p>
+
+<p><strong>deer-flow：</strong> <code>tools/tools.py:44</code> 中的 <code>get_available_tools()</code> 按严格的优先级顺序组装工具：配置定义的工具 → 内置工具（present_files、ask_clarification）→ 子 agent task 工具 → vision 工具 → MCP 工具（惰性初始化，用 mtime 做缓存）→ ACP 工具 → skill 管理。<code>DeferredToolFilterMiddleware</code> 对 LLM 隐藏 MCP 工具 schema，直到 <code>tool_search</code> 提升触发它们 — 这是一种独特的"惰性工具加载"模式，当 MCP 服务器暴露数百个工具时，可保持上下文窗口精简。</p>
+
+<p>这种中间件驱动的方法翻转了控制权：工具可用性不再是配置好注册表再执行，而是成为中间件栈当前状态的函数。skill 激活可以添加工具，权限变更可以移除工具。工具系统是动态的，而非静态的。</p>
+
 <h2>阶段 3：调度 — 工具如何执行</h2>
 
 <h3>执行时机</h3>
@@ -186,15 +197,19 @@ pub trait CoreToolRuntime: Send + Sync {
   <tr><td>nanobot</td><td>顺序，带 <code>concurrency_safe</code> 标志</td><td><code>Tool.concurrency_safe</code> / <code>Tool.exclusive</code> 属性</td></tr>
   <tr><td>codex</td><td>通过 Tokio + FuturesOrdered 并行</td><td><code>tool_supports_parallel()</code> 控制并发执行</td></tr>
   <tr><td>opencode</td><td>通过 Effect fiber 顺序 settle</td><td>每次 <code>settle()</code> 调用是其自身 Effect</td></tr>
+  <tr><td>deepagents</td><td>通过 ToolNode 顺序执行</td><td>LangGraph 的 <code>ToolNode</code> 按顺序执行工具；中间件可通过 <code>wrap_tool_call</code> 包装</td></tr>
+  <tr><td>deer-flow</td><td>顺序 + 并发批次</td><td><code>_execute_concurrent_tool_calls()</code> 用于安全工具；<code>SubAgentLimitMiddleware</code> 上限为 3</td></tr>
 </table>
 
 <h3>沙箱</h3>
 
-<p>只有一个代码库有真正的沙箱方案：</p>
+<p>只有两个代码库有真正的沙箱方案：</p>
 
 <p><strong>codex：</strong> <code>ToolOrchestrator</code>（orchestrator.rs）提供多层沙箱：Landlock（Linux）、Windows 沙箱、macOS 沙箱、提升/受限 token。当沙箱拒绝时，编排器可以<em>以提升的沙箱级别重试</em> — 如果受限沙箱阻止了文件写入，工具可以用提升的沙箱重试。网络访问审批是一个一等概念，支持立即和延迟两种模式。</p>
 
-<p>所有其他代码库将沙箱化委托给外部机制：pi-mono/openclaw 使用 <code>beforeToolCall</code> 钩子，hermes-agent 使用基于环境的终端，claude-code 使用工具访问的权限检查（而非执行沙箱）。</p>
+<p><strong>deer-flow：</strong> 第二个有真正沙箱方案的代码库。<code>sandbox/sandbox_provider.py</code> 中的 <code>SandboxProvider</code> 模式抽象了跨 Local、Docker 和 AioSandbox 后端的执行。工具看到的是虚拟路径（<code>/mnt/user-data/workspace</code>），这些路径被转换为宿主机路径。沙箱工具（bash、ls、read_file、write_file、glob、grep、str_replace）经过虚拟路径转换（<code>validate_local_tool_path()</code>）和路径遍历检测。写入大小上限 80KB。这是沙箱化作为一等架构维度，而非事后补救 — 并且它被集成到工具系统之中，而非包裹在外部。</p>
+
+<p>所有其他代码库将沙箱化委托给外部机制：pi-mono/openclaw 使用 <code>beforeToolCall</code> 钩子，hermes-agent 使用基于环境的终端，claude-code 使用工具访问的权限检查（而非执行沙箱），deepagents 委托给后端协议（<code>SandboxBackendProtocol</code>）。</p>
 
 <h2>阶段 4：规范化 — 结果如何反馈</h2>
 
@@ -211,15 +226,15 @@ pub trait CoreToolRuntime: Send + Sync {
 <h2>对比总表</h2>
 
 <table>
-  <tr><th>维度</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th></tr>
-  <tr><td><strong>工具数量</strong></td><td>4（应用定义）</td><td>不适用（框架）</td><td>30+</td><td>80+</td><td>~20</td><td>30+ 个处理器</td><td>~15</td></tr>
-  <tr><td><strong>定义</strong></td><td>TS 泛型</td><td>TS 泛型</td><td>Zod 对象</td><td>JSON Schema 字典</td><td>ABC + JSON Schema</td><td>Rust trait</td><td>Effect Schema</td></tr>
-  <tr><td><strong>注册表</strong></td><td>无（数组）</td><td>无（数组）</td><td>扁平数组</td><td>单例 + AST</td><td>字典 + pkgutil</td><td>Trait + 每轮构建</td><td>WeakMap + DI</td></tr>
-  <tr><td><strong>发现</strong></td><td>使用者提供</td><td>使用者提供</td><td>Feature flag</td><td>AST 扫描 + MCP</td><td>pkgutil + 插件</td><td>每轮构建</td><td>基于作用域</td></tr>
-  <tr><td><strong>沙箱</strong></td><td>无（钩子）</td><td>无（钩子）</td><td>无（权限）</td><td>无（环境）</td><td>无</td><td>多层 + 重试</td><td>无</td></tr>
-  <tr><td><strong>并发</strong></td><td>顺序/并行</td><td>顺序/并行</td><td>分区</td><td>顺序 + 异步桥接</td><td>顺序 + 标志</td><td>Tokio 并行</td><td>顺序（Effect）</td></tr>
-  <tr><td><strong>结果处理</strong></td><td>ToolResultMessage</td><td>ToolResultMessage + 进度</td><td>7+ 渲染方法 + 卸载</td><td>JSON 字符串</td><td>原始 + 错误字符串</td><td>ToolOutput trait</td><td>Schema 编码</td></tr>
-  <tr><td><strong>独特之处</strong></td><td>钩子生命周期</td><td>进度流式传输</td><td>逐工具 UI 渲染</td><td>工具集 + TTL 缓存</td><td>插件发现</td><td>沙箱升级</td><td>作用域清理</td></tr>
+  <tr><th>维度</th><th>pi-mono</th><th>openclaw</th><th>claude-code</th><th>hermes-agent</th><th>nanobot</th><th>codex</th><th>opencode</th><th>deepagents</th><th>deer-flow</th></tr>
+  <tr><td><strong>工具数量</strong></td><td>4（应用定义）</td><td>不适用（框架）</td><td>30+</td><td>80+</td><td>~20</td><td>30+ 个处理器</td><td>~15</td><td>~10（中间件）</td><td>~20（组装）</td></tr>
+  <tr><td><strong>定义</strong></td><td>TS 泛型</td><td>TS 泛型</td><td>Zod 对象</td><td>JSON Schema 字典</td><td>ABC + JSON Schema</td><td>Rust trait</td><td>Effect Schema</td><td>LangChain BaseTool</td><td>LangChain BaseTool</td></tr>
+  <tr><td><strong>注册表</strong></td><td>无（数组）</td><td>无（数组）</td><td>扁平数组</td><td>单例 + AST</td><td>字典 + pkgutil</td><td>Trait + 每轮构建</td><td>WeakMap + DI</td><td>中间件栈</td><td>优先级链 + 过滤器</td></tr>
+  <tr><td><strong>发现</strong></td><td>使用者提供</td><td>使用者提供</td><td>Feature flag</td><td>AST 扫描 + MCP</td><td>pkgutil + 插件</td><td>每轮构建</td><td>基于作用域</td><td>中间件贡献</td><td>配置 + MCP + skills</td></tr>
+  <tr><td><strong>沙箱</strong></td><td>无（钩子）</td><td>无（钩子）</td><td>无（权限）</td><td>无（环境）</td><td>无</td><td>多层 + 重试</td><td>无</td><td>后端协议</td><td>Provider 模式 + vpaths</td></tr>
+  <tr><td><strong>并发</strong></td><td>顺序/并行</td><td>顺序/并行</td><td>分区</td><td>顺序 + 异步桥接</td><td>顺序 + 标志</td><td>Tokio 并行</td><td>顺序（Effect）</td><td>顺序（ToolNode）</td><td>批次 顺序/并行</td></tr>
+  <tr><td><strong>结果处理</strong></td><td>ToolResultMessage</td><td>ToolResultMessage + 进度</td><td>7+ 渲染方法 + 卸载</td><td>JSON 字符串</td><td>原始 + 错误字符串</td><td>ToolOutput trait</td><td>Schema 编码</td><td>中间件包装</td><td>中间件包装 + 截断</td></tr>
+  <tr><td><strong>独特之处</strong></td><td>钩子生命周期</td><td>进度流式传输</td><td>逐工具 UI 渲染</td><td>工具集 + TTL 缓存</td><td>插件发现</td><td>沙箱升级</td><td>作用域清理</td><td>描述覆盖</td><td>延迟工具加载</td></tr>
 </table>
 
 <h2>核心权衡：复杂度预算</h2>
@@ -307,13 +322,17 @@ pub trait CoreToolRuntime: Send + Sync {
   <li><strong>nanobot</strong>：<code>nanobot/agent/tools/base.py:124</code>（Tool ABC），<code>registry.py:9</code>（ToolRegistry），<code>loader.py:21</code>（ToolLoader）</li>
   <li><strong>codex</strong>：<code>codex-rs/core/src/tools/registry.rs:47</code>（CoreToolRuntime），<code>orchestrator.rs</code>（ToolOrchestrator）</li>
   <li><strong>opencode</strong>：<code>packages/core/src/tool/tool.ts:20</code>（Tool.make），<code>registry.ts</code>（ToolRegistry）</li>
+  <li><strong>deepagents</strong>：<code>libs/deepagents/deepagents/middleware/filesystem.py:751</code>（FilesystemMiddleware 工具），<code>middleware/subagents.py:528</code>（_build_task_tool），<code>_tools.py:30</code>（描述覆盖）</li>
+  <li><strong>deer-flow</strong>：<code>backend/packages/harness/deerflow/tools/tools.py:44</code>（get_available_tools — 优先级组装），<code>agents/middlewares/deferred_tool_filter_middleware.py</code>（惰性 MCP schema 加载）</li>
 </ol>
 
 <h2>推荐后续阅读</h2>
 <ul>
   <li>如果你想了解<strong>最复杂</strong>的工具系统：追踪 <code>codex/codex-rs/core/src/tools/orchestrator.rs</code> — 审批 → 沙箱 → 执行 → 重试管道。</li>
-  <li>如果你想了解<strong>最独特</strong>的发现机制：阅读 <code>hermes-agent/tools/registry.py</code> — 基于 AST 的工具扫描在其他 6 个代码库中绝无仅有。</li>
+  <li>如果你想了解<strong>最独特</strong>的发现机制：阅读 <code>hermes-agent/tools/registry.py</code> — 基于 AST 的工具扫描在其他 8 个代码库中绝无仅有。</li>
   <li>如果你想了解<strong>最实用</strong>的模式：<code>codex/codex-rs/core/src/tools/router.rs</code> — 每轮构建全新路由器并进行工具搜索，这是一个清晰、可测试的模式。</li>
+  <li>如果你想了解<strong>中间件驱动</strong>模式：<code>deepagents/libs/deepagents/deepagents/middleware/</code> — 每个文件是一个贡献工具的中间件。追踪 FilesystemMiddleware 以了解工具如何被定义、暴露和包装。</li>
+  <li>如果你想了解<strong>惰性工具加载</strong>模式：<code>deer-flow/backend/packages/harness/deerflow/agents/middlewares/deferred_tool_filter_middleware.py</code> — MCP 工具 schema 对 LLM 隐藏，直到由 <code>tool_search</code> 提升。</li>
 </ul>
 
 <div class="callout">

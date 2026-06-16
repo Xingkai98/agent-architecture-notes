@@ -8,3 +8,13 @@ index.md
 MISSION.md
 RESOURCES.md
 learning-records/*.md
+
+# Build artifacts
+.venv/
+
+# Generated media
+podcast-scripts/episode-*.mp3
+podcast-scripts/tmp_segments/
+
+# Cloned reference repos
+reference/frameworks/

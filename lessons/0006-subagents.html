@@ -23,11 +23,11 @@
 
 <h1>Lesson 0006: Sub-agents</h1>
 <p class="subtitle">Spawn, isolate, delegate, collect — the four acts of every multi-agent system.</p>
-<p class="meta">June 2026 · 8 primary source codebases · <a href="0006-subagents.html">Permalink</a></p>
+<p class="meta">June 2026 · 9 primary source codebases · <a href="0006-subagents.html">Permalink</a></p>
 
 <p class="sidenote">Every sub-agent system answers the same four questions: <strong>how</strong> is the child spawned, <strong>what</strong> can it see, <strong>how much</strong> can it spend, and <strong>how</strong> do results flow back to the parent. The differences between codebases are all in <em>where</em> they draw the isolation boundary and <em>how</em> they enforce it.</p>
 
-<p>In <a href="0002-tool-system.html">Lesson 0002</a>, we saw that tools are the engine of the agent loop. This lesson zooms out one level: <em>when one agent becomes many</em>. We'll trace sub-agent spawning, context isolation, resource budgeting, and result collection across all eight codebases, then extract the design heuristics that hold regardless of framework.</p>
+<p>In <a href="0002-tool-system.html">Lesson 0002</a>, we saw that tools are the engine of the agent loop. This lesson zooms out one level: <em>when one agent becomes many</em>. We'll trace sub-agent spawning, context isolation, resource budgeting, and result collection across all nine codebases, then extract the design heuristics that hold regardless of framework.</p>
 
 <h2>The spawn spectrum</h2>
 
@@ -253,6 +253,82 @@ interface SpawnAcpParams {
 
 <p>OpenClaw's ACP layer provides 24 channels for inter-agent communication. Each agent subscribes to channels it cares about; the ACP router delivers messages by channel subscription, not by agent identity. This decoupling means agents can be added, removed, or replaced without reconfiguring the routing table.</p>
 
+<h2>DeepAgents — sync sub-agents with state sharing</h2>
+
+<p>DeepAgents takes a pragmatic approach: fast, synchronous, and state-efficient. Sub-agents run in-process and share the parent's LangGraph state — only messages, todos, and structured_response are excluded.</p>
+
+<h3>SubAgentMiddleware</h3>
+
+<p>At <code>middleware/subagents.py:734</code>, <code>SubAgentMiddleware</code> exposes a single <code>task</code> tool to the parent agent. The tool is built by <code>_build_task_tool()</code> at line 528 and accepts a sub-agent type name, a task description, and optional configuration overrides.</p>
+
+<h3>Sub-agent specification and compilation</h3>
+
+<p>A sub-agent is defined by a <code>SubAgent</code> TypedDict (line 36–161) and compiled into a <code>CompiledSubAgent</code> (line 164–241). <code>create_sub_agent()</code> (line 459) calls <code>create_agent()</code> with the sub-agent's specified model, tools, and middleware. The system prompt is injected declaratively through the spec's <code>prompt</code> field — there is no runtime rewriting.</p>
+
+<h3>State sharing: parent state by default</h3>
+
+<p>The <code>task()</code> function (line 668) calls <code>subagent.invoke(subagent_state, subagent_config)</code> synchronously (line 693). The sub-agent runs on the parent's full state <em>except</em> for <code>_EXCLUDED_STATE_KEYS</code> (line 249): messages, todos, and structured_response. This means tool results, file reads, and other state channels are shared automatically — efficient, but tightly coupled. A sub-agent can pollute the parent's file-read cache or accumulate unbound tool outputs in shared state channels.</p>
+
+<h3>GENERAL_PURPOSE_SUBAGENT and system prompt injection</h3>
+
+<p>A <code>GENERAL_PURPOSE_SUBAGENT</code> is available by default (line 427). <code>wrap_model_call()</code> (line 848) injects the available sub-agent types and their descriptions into the system prompt, so the parent model always knows which sub-agents it can delegate to.</p>
+
+<h3>Concurrency model</h3>
+
+<p>DeepAgents sync sub-agents are inherently sequential — the parent blocks on <code>subagent.invoke()</code> until the child returns. There is no explicit concurrency limit because there is no concurrent execution path for sync sub-agents. The implicit limit is 1 at a time.</p>
+
+<h2>DeepAgents Async — remote execution via LangGraph SDK</h2>
+
+<p>At <code>middleware/async_subagents.py:866</code>, <code>AsyncSubAgentMiddleware</code> exposes five tools for remote sub-agent lifecycle management:</p>
+
+<table>
+  <tr><th>Tool</th><th>Purpose</th></tr>
+  <tr><td><code>start_async_task</code></td><td>Launch a sub-agent on a remote LangGraph deployment</td></tr>
+  <tr><td><code>check_async_task</code></td><td>Poll the status of a remote sub-agent</td></tr>
+  <tr><td><code>update_async_task</code></td><td>Modify a running remote sub-agent's instructions</td></tr>
+  <tr><td><code>cancel_async_task</code></td><td>Terminate a remote sub-agent</td></tr>
+  <tr><td><code>list_async_tasks</code></td><td>Enumerate all remote sub-agents with their statuses</td></tr>
+</table>
+
+<p>This is unique among our codebases: DeepAgents async sub-agents are the <strong>only</strong> sub-agent implementation that uses LangGraph SDK for remote execution. The sub-agent runs on a separate LangGraph deployment, not in the parent process. Task state is tracked in <code>AsyncSubAgentState.async_tasks</code> via <code>_tasks_reducer</code>.</p>
+
+<h2>DeerFlow — async sub-agents with dual thread pools</h2>
+
+<p>DeerFlow takes the opposite approach from DeepAgents: full isolation, async-by-default, with a dedicated lifecycle manager backed by separate scheduler and execution thread pools.</p>
+
+<h3>SubAgentExecutor: dual thread pools</h3>
+
+<p>At <code>subagents/executor.py:276</code>, <code>SubAgentExecutor</code> manages the full sub-agent lifecycle. It maintains two thread pools: a <strong>_scheduler_pool</strong> (3 workers) for dispatching and status management, and an <strong>_execution_pool</strong> (3 workers) for running sub-agent agent loops. This separation prevents scheduling overhead from competing with execution throughput.</p>
+
+<h3>Execution paths</h3>
+
+<ul>
+  <li><strong><code>execute()</code> (line 714):</strong> Synchronous entry point. Detects if there is a running event loop and uses an isolated persistent loop if needed, preventing event loop conflicts in async environments like FastAPI.</li>
+  <li><strong><code>execute_async()</code> (line 758):</strong> Fire-and-forget in the background via the scheduler thread pool. Returns immediately; the parent polls for completion.</li>
+  <li><strong><code>_aexecute()</code> (line 483):</strong> Core async implementation. Builds initial state, creates the agent, streams via <code>agent.astream()</code>, and collects AIMessages.</li>
+</ul>
+
+<h3>SubAgentConfig and tool control</h3>
+
+<p>At <code>subagents/config.py:11</code>, <code>SubAgentConfig</code> defines: name, description, system_prompt, tool allow/deny lists, skills, model (inherit or explicit), max_turns (default 50), and timeout_seconds (default 900 = 15 minutes). Built-in sub-agents (at <code>builtins/__init__.py:12</code>) include <strong>general-purpose</strong> (all tools except <code>task</code>) and <strong>bash</strong> (command specialist).</p>
+
+<h3>Isolation and polling</h3>
+
+<p>Sub-agent graphs are compiled with <code>checkpointer=False</code> — they are one-shot, never resumed. No state is shared with the parent. The parent polls at 5-second intervals for completion status. This is safer than sharing state (no risk of cache pollution or side effects) but adds latency: worst case, the parent waits 5 seconds after the sub-agent finishes before discovering the result.</p>
+
+<h3>Concurrency enforcement: SubAgentLimitMiddleware</h3>
+
+<p><code>SubAgentLimitMiddleware</code> caps concurrent sub-agents at <code>MAX_CONCURRENT_SUBAGENTS</code> (default 3) by <strong>truncating excess <code>task</code> tool calls</strong> in <code>after_model</code>. This is an aggressive enforcement strategy: if the model requests 5 sub-agents and the limit is 3, the last 2 tool calls are silently dropped. The model never knows those sub-agents failed to spawn — it must infer from missing results.</p>
+
+<h2>DeepAgents vs DeerFlow: state-sharing vs isolation</h2>
+
+<div class="callout">
+  <strong>"DeepAgents trusts the sub-agent; DeerFlow distrusts it."</strong><br>
+  This is the defining tradeoff between these two designs. DeepAgents sync sub-agents share the parent's state graph (except messages, todos, structured_response). Tool results, file reads, and other channels flow automatically between parent and child — no serialization, no polling. But a misbehaving sub-agent can corrupt shared state. DeerFlow compiles every sub-agent graph with checkpointer=False and shares nothing. The sub-agent is a black box: input goes in, result comes out after polling. Safer, but you pay for every byte of context that must be explicitly passed in the task description.
+</div>
+
+<p>The concurrency models reflect the same philosophical split. DeepAgents sync sub-agents are sequential — the parent blocks, so concurrency is not even a question. DeerFlow embraces parallelism but defends against it with <code>SubAgentLimitMiddleware</code> at 3 concurrent sub-agents, enforced by <em>truncating</em> tool calls in <code>after_model</code>. DeepAgents async sub-agents sidestep the local concurrency question entirely by delegating to remote LangGraph deployments — the only codebase in our set to do so.</p>
+
 <h2>Comparative table</h2>
 
 <table>
@@ -264,6 +340,8 @@ interface SpawnAcpParams {
   <tr><td><strong>nanobot</strong></td><td>asyncio.Task</td><td>Message bus injection</td><td>max_concurrent_subagents</td><td>Event-loop cooperative</td><td>subagent_result event</td><td>Implicit (via spawn)</td></tr>
   <tr><td><strong>opencode</strong></td><td>Child session (sessions.create)</td><td>Derived permission ruleset</td><td>Foreground + Background</td><td>Per-session context window</td><td>Session result</td><td>Configurable</td></tr>
   <tr><td><strong>openclaw</strong></td><td>ACP spawn</td><td>ACP channel isolation</td><td>24 ACP channels</td><td>Per-agent model + thinking config</td><td>Channel subscription</td><td>Yes (ACP routing)</td></tr>
+  <tr><td><strong>deepagents</strong></td><td>In-process (LangGraph state)</td><td>Shared state (excl. messages, todos, structured_response)</td><td>Sequential (sync) / Remote via LangGraph SDK (async)</td><td>Per sub-agent spec (model, tools, middleware)</td><td>Return value (sync) / Polling via check_async_task (async)</td><td>Yes (task tool)</td></tr>
+  <tr><td><strong>deerflow</strong></td><td>Dual thread pools (scheduler + executor)</td><td>Full (checkpointer=False, no state sharing)</td><td>MAX_CONCURRENT_SUBAGENTS=3 (truncation)</td><td>Per sub-agent: max_turns (50), timeout_seconds (900)</td><td>Polling (5s interval)</td><td>Yes (general-purpose has task tool)</td></tr>
 </table>
 
 <h2>Design heuristics</h2>
@@ -323,11 +401,29 @@ interface SpawnAcpParams {
     <div class="option" data-q="4" data-a="d">web_search, web_fetch, browse</div>
   </div>
   <div class="feedback" id="feedback4"></div>
+
+  <div class="question">Q5. Which codebase's async sub-agents use LangGraph SDK for remote execution — a feature unique among all codebases in our set?</div>
+  <div class="options">
+    <div class="option" data-q="5" data-a="a">DeepAgents</div>
+    <div class="option" data-q="5" data-a="b">DeerFlow</div>
+    <div class="option" data-q="5" data-a="c">Nanobot</div>
+    <div class="option" data-q="5" data-a="d">OpenClaw</div>
+  </div>
+  <div class="feedback" id="feedback5"></div>
+
+  <div class="question">Q6. How does DeerFlow's SubAgentLimitMiddleware enforce the MAX_CONCURRENT_SUBAGENTS limit?</div>
+  <div class="options">
+    <div class="option" data-q="6" data-a="a">Queues excess sub-agent requests for later execution</div>
+    <div class="option" data-q="6" data-a="b">Truncates excess task tool calls in after_model</div>
+    <div class="option" data-q="6" data-a="c">Returns an error message to the parent model</div>
+    <div class="option" data-q="6" data-a="d">Dynamically expands the thread pool to accommodate</div>
+  </div>
+  <div class="feedback" id="feedback6"></div>
 </div>
 
 <script>
 (function() {
-  var answers = { 1: 'c', 2: 'b', 3: 'b', 4: 'b' };
+  var answers = { 1: 'c', 2: 'b', 3: 'b', 4: 'b', 5: 'a', 6: 'b' };
   document.querySelectorAll('.option').forEach(function(opt) {
     opt.addEventListener('click', function() {
       var q = this.dataset.q;
@@ -366,6 +462,8 @@ interface SpawnAcpParams {
   <li><strong>nanobot</strong>: <code>nanobot/agent/subagent.py:74</code> (SubagentManager.spawn), <code>_announce_result()</code>, <code>SubagentStatus</code> dataclass</li>
   <li><strong>opencode</strong>: <code>packages/opencode/src/tool/task.ts</code> (TaskTool), <code>packages/opencode/src/agent/subagent-permissions.ts</code> (derived permissions)</li>
   <li><strong>openclaw</strong>: <code>src/agents/acp-spawn.ts</code> (SpawnAcpParams), ACP channel routing</li>
+  <li><strong>deepagents</strong>: <code>middleware/subagents.py:734</code> (SubAgentMiddleware), <code>middleware/subagents.py:528</code> (_build_task_tool), <code>middleware/subagents.py:668</code> (task function), <code>middleware/subagents.py:36-241</code> (SubAgent TypedDict, CompiledSubAgent), <code>middleware/subagents.py:459</code> (create_sub_agent), <code>middleware/subagents.py:848</code> (wrap_model_call), <code>middleware/async_subagents.py:866</code> (AsyncSubAgentMiddleware)</li>
+  <li><strong>deerflow</strong>: <code>subagents/executor.py:276</code> (SubAgentExecutor), <code>subagents/executor.py:714</code> (execute), <code>subagents/executor.py:758</code> (execute_async), <code>subagents/executor.py:483</code> (_aexecute), <code>subagents/config.py:11</code> (SubAgentConfig), <code>builtins/__init__.py:12</code> (built-in sub-agents), SubAgentLimitMiddleware (concurrency enforcement)</li>
 </ol>
 
 <h2>Recommended next reading</h2>
@@ -374,6 +472,8 @@ interface SpawnAcpParams {
   <li>If you want the <strong>cleanest budget model</strong>: read <code>hermes-agent/agent/iteration_budget.py</code> — the per-child iteration cap is the simplest, most effective guardrail in the set.</li>
   <li>If you want the <strong>strongest isolation</strong>: study <code>pi-mono/packages/coding-agent/examples/extensions/subagent/index.ts</code> — child_process.spawn with JSONL streaming is portable, debuggable, and OS-enforced.</li>
   <li>If you want the <strong>most practical</strong> pattern: <code>claude-code/src/tools/AgentTool/runAgent.ts</code> — the sync/async/fork trinity covers the vast majority of real-world delegation needs.</li>
+  <li>If you want to understand <strong>state-sharing tradeoffs</strong>: compare <code>deepagents/middleware/subagents.py:668</code> (sync, parent state shared) with <code>deerflow/subagents/executor.py:483</code> (async, checkpointer=False, full isolation). The two designs represent opposite poles of the trust spectrum.</li>
+  <li>If you want the <strong>only remote-execution sub-agent model</strong>: trace <code>deepagents/middleware/async_subagents.py:866</code> — LangGraph SDK-based remote sub-agents with full lifecycle management via five dedicated tools.</li>
 </ul>
 
 <div class="callout">
