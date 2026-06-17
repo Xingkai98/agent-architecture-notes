@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<script>(function(){var p=window.location.pathname;var l=p.indexOf('/zh/')>-1?'zh':'en';var s=localStorage.getItem('lang')||'zh';if(s!==l){var b='/agent-architecture-notes';var r=p.replace(b,'').replace(/^\/zh\//,'/');window.location.href=s==='zh'?b+'/zh'+r:b+r;}})();</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent 系统复习指南 — 从架构到评测的完整知识地图</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  :root {
+    --bg: #fffff8;
+    --text: #111;
+    --muted: #666;
+    --accent: #a00;
+    --rule: #ddd;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem 6rem;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+  h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.35rem; margin: 2rem 0 0.5rem; border-bottom: 1px solid var(--rule); padding-bottom: 0.25rem; }
+  h3 { font-size: 1.1rem; margin: 1.2rem 0 0.4rem; }
+  p, li { font-size: 0.95rem; margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 1.5rem; }
+  .meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 2rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.88rem; }
+  th, td { padding: 0.4rem 0.6rem; text-align: left; border-bottom: 1px solid var(--rule); }
+  th { font-weight: 600; background: #f8f8f0; }
+  blockquote {
+    border-left: 3px solid var(--accent);
+    margin: 1rem 0;
+    padding: 0.5rem 1rem;
+    color: var(--muted);
+    font-style: italic;
+  }
+  em { font-style: italic; }
+  code { font-family: "SF Mono", "Monaco", "Menlo", monospace; font-size: 0.88rem; background: #f4f4f0; padding: 0.1em 0.3em; border-radius: 2px; }
+  pre { background: #f8f8f0; padding: 1rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.4; margin: 1rem 0; border: 1px solid var(--rule); border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  a { color: var(--accent); }
+  .nav { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; font-size: 0.9rem; }
+  .callout {
+    background: #fff9e6;
+    border: 1px solid #e6d88a;
+    padding: 0.8rem 1rem;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+    border-radius: 3px;
+  }
+  @media (max-width: 1100px) { .sidenote { float: none; width: auto; margin: 0.3rem 0; display: block; } }
+</style>
+</head>
+<body>
+
+<nav class="lang-nav">
+  <a href="#" data-lang="en">EN</a>
+  <span>/</span>
+  <a href="#" data-lang="zh">中文</a>
+</nav>
+
+<h1>Agent 系统复习指南</h1>
+<p class="subtitle">从架构、工具、上下文到 RAG、对齐训练和评测闭环的完整知识梳理。</p>
+<p class="meta">个人复习笔记 · 2026-06-17 · 基于 MyAgent 项目实践整理</p>
+
+<h2>0. 总体框架</h2>
+
+<p>理解一个 Agent 系统，核心是判断三件事：</p>
+
+<ol>
+  <li>是否真的理解 Agent 系统，而不是只会调 LLM API。</li>
+  <li>是否能把 Agent 问题拆成：理解、规划、执行、记忆、工具、安全、评测、数据闭环。</li>
+  <li>是否对 RAG、SFT、DPO、RLHF 有正确概念，并能说明它们如何服务 Agent。</li>
+</ol>
+
+<p>主线逻辑：</p>
+
+<blockquote>
+  我主要做过一个轻量级通用 Agent 框架 MyAgent，重点在 Agent loop、工具调用、上下文管理、生命周期 Hook、子 Agent 委托、安全边界和本地 benchmark。RAG、SFT、DPO、RLHF 我理解它们在 Agent 系统中的位置：RAG 解决外部知识获取，对齐训练解决工具调用、规划轨迹、格式遵循和偏好优化，评测与 trace 则是数据飞轮的入口。
+</blockquote>
+
+<div class="callout">
+  <strong>诚实定位：</strong>RAG 和对齐训练不是孤立技术，它们都要服务于 Agent 的任务完成率。更稳的说法是：<em>我没有把 RLHF 或 RAG 作为主项目完整上线过，但我理解标准链路和关键问题，也能把它们接到 Agent 框架里。例如 RAG 可以作为 RetrievalTool 接入 MyAgent；线上 badcase 和 benchmark trace 可以沉淀成 SFT 或 DPO 数据。</em>
+</div>
+
+<h2>1. MyAgent 项目核心架构</h2>
+
+<h3>1.1 一句话概括</h3>
+
+<blockquote>
+  MyAgent 是我用 Python / asyncio 从零实现的轻量级通用 AI Agent 框架，核心是一个 LLM → tool calls → tool results → messages 的 AgentLoop，并围绕它实现了工具注册、工作区安全、沙箱执行、Hook 生命周期、上下文压缩、Markdown 技能、子 Agent 委托、trace 记录和 SWE-bench 风格的本地 benchmark。
+</blockquote>
+
+<h3>1.2 核心架构</h3>
+
+<pre><code>user messages
+    → AgentLoop
+    → llm.chat(messages, tools)
+    → LLMResponse(content, tool_calls)
+    → ToolRegistry.execute(tool_call)
+    → tool_result message
+    → MemoryManager.compact_if_needed()
+    → repeat until no tool call or max iterations</code></pre>
+
+<h3>1.3 关键模块拆解</h3>
+
+<ul>
+  <li><strong>AgentLoop</strong>：负责状态推进，messages 是唯一状态。</li>
+  <li><strong>ToolRegistry</strong>：工具注册、schema 暴露、按 name 执行工具。</li>
+  <li><strong>Tool</strong>：每个工具声明 name、description、JSON Schema、read_only / dangerous。</li>
+  <li><strong>WorkspacePolicy</strong>：限制路径越界、敏感文件写入、危险命令。</li>
+  <li><strong>SandboxExecutor</strong>：基于 subprocess，返回 exit_code / stdout / stderr / duration / timed_out。</li>
+  <li><strong>HookManager</strong>：六个生命周期点（before_iteration、after_llm_call、before_tool_execute、after_tool_execute、on_error、on_completion），用于日志、trace、重试、预算监控。</li>
+  <li><strong>MemoryManager</strong>：token 超预算时保留 system 和最近消息，避免上下文无限膨胀。</li>
+  <li><strong>SubAgentManager</strong>：用 asyncio.create_task 做后台委托，通过 ParentChannel 回传结果。</li>
+  <li><strong>TraceRecorder</strong>：记录 LLM iteration、tool call、tool result、edit、diff、test、completion。</li>
+  <li><strong>BenchmarkRunner</strong>：用 worktree 隔离任务，保存 result、trace、diff、test output。</li>
+</ul>
+
+<h3>1.4 设计取舍</h3>
+
+<blockquote>
+  我让 AgentLoop 保持薄，因为 Agent 框架很容易变成一个巨大的 if-else。我的设计是把 loop 作为 orchestrator，工具、安全、记忆、评测、trace 都独立成模块。这样新增工具、新增 Hook、新增 benchmark runner 都不需要改核心 loop。
+</blockquote>
+
+<h2>2. 核心追问与深度回答</h2>
+
+<h3>Q1：Agent 和普通 ChatBot 有什么区别？</h3>
+
+<p>普通 ChatBot 主要是单轮或多轮文本生成，输出通常就是答案。Agent 需要在环境里行动，它会理解任务、规划步骤、调用工具、观察结果、根据结果继续决策，直到完成任务。所以 Agent 的核心是闭环：reasoning → action → observation → next action。工程上还需要状态管理、工具协议、错误恢复、权限控制、trace 和评测。</p>
+
+<h3>Q2：AgentLoop 是怎么设计的？</h3>
+
+<p>把 messages 作为唯一可变状态。每一轮先执行 before_iteration hook，然后取 ToolRegistry 的所有工具 schema 调 LLM。LLM 如果没有 tool calls，就返回最终答案；如果有 tool calls，就解析 JSON 参数，执行 before_tool_execute hook，调用 ToolRegistry.execute，拿到结果后执行 after_tool_execute hook，再把 tool result 写回 messages。最后做 memory compact，进入下一轮。</p>
+
+<p>关键细节：</p>
+<ul>
+  <li>对非法 JSON 参数会转成错误 observation 写回模型，而不是让系统崩掉。</li>
+  <li>对工具异常也会捕获并写成错误结果。</li>
+  <li>有 max_iterations，防止无限循环。</li>
+  <li>max_tokens 截断时会追加 continue 指令继续生成。</li>
+</ul>
+
+<h3>Q3：工具系统怎么设计？</h3>
+
+<p>每个工具继承 Tool 基类，声明 name、description、parameters，其中 parameters 是 JSON Schema。ToolRegistry 负责注册工具，把 schema 列表给 LLM，也按 tool name 找到具体工具执行。这样模型只看到结构化工具定义，执行细节由框架控制。</p>
+
+<p>工具分类：</p>
+<ul>
+  <li>read_only 工具：Read、Grep、ListFiles、Find、WebSearch、WebFetch。</li>
+  <li>read_write 工具：Write、Edit。</li>
+  <li>dangerous 工具：Bash，需要沙箱和命令策略。</li>
+</ul>
+
+<h3>Q4：怎么保证工具调用安全？</h3>
+
+<p>两层安全：</p>
+<ul>
+  <li><strong>WorkspacePolicy</strong>：限制文件路径必须在 workspace 内，禁止写 .env、密钥、.git、venv、node_modules 等敏感位置，也有命令 denylist。</li>
+  <li><strong>SandboxExecutor</strong>：对 Bash 类危险工具做 subprocess 执行，限制超时，返回结构化结果（exit_code、stdout、stderr、duration、timed_out）。</li>
+</ul>
+
+<p>关键实现：路径穿越用 Path.resolve 后校验 relative_to workspace；命令风险用 allowlist + denylist。</p>
+
+<h3>Q5：长上下文怎么处理？</h3>
+
+<p>MemoryManager 每轮工具调用后检查 token 预算。策略是保留 system 消息和最近窗口，同时保证最近的 tool chain 不被截断（tool result 必须和 assistant tool call 成对出现）。更完整的版本可以对中间历史做 LLM 摘要，或者接 retrieval memory，把长期信息向量化存储。</p>
+
+<div class="callout">
+  <strong>注意：</strong>不要说"长上下文只要换更大 context 模型"。更好的说法是结构化状态、摘要、检索记忆、约束追踪一起做。
+</div>
+
+<h3>Q6：Hook 有什么用？</h3>
+
+<p>Hook 是为了把监控、重试、trace、预算控制从 AgentLoop 中解耦出来。六个扩展点：before_iteration、after_llm_call、before_tool_execute、after_tool_execute、on_error、on_completion。比如要记录工具耗时、做 token 预算、加 debug breakpoint、失败重试，都可以通过 Hook 实现，不需要改 loop。</p>
+
+<h3>Q7：为什么需要 trace？</h3>
+
+<p>Agent 的失败通常不是最终答案一句话能看出来的，而是过程问题：意图理解错、工具选错、参数错、工具结果没读懂、上下文丢失、循环过多。TraceRecorder 记录每轮 LLM、tool call、tool result、edit、diff、test 和 completion，方便复盘和失败归因。后续 trace 还能作为 SFT / DPO / 评测集的数据来源。</p>
+
+<h3>Q8：SubAgent 是怎么做的？</h3>
+
+<p>SubAgentManager 用 asyncio.create_task 创建后台任务，每个子 Agent 有一个 subagent_id 和 ParentChannel。父 Agent 可以把相对独立的任务委托出去，子 Agent 执行完成后通过 channel 回传结果。适用于搜索、代码审查、并行分析等可拆开的子任务。</p>
+
+<h3>Q9：Benchmark 怎么设计？</h3>
+
+<p>参考 SWE-bench 做本地 coding-agent benchmark。每个任务目录包含 task.json、issue.md、gold.patch、test.patch。Runner 基于 base_commit 创建临时 git worktree，把 issue 给 agent，agent 完成后保存 final diff。如果有 test.patch，则最后才应用隐藏测试，再运行 validation command。每个任务保存 result.json、trace.json、final.diff、test_output.txt、runner.log。</p>
+
+<p>指标：pass / fail / warning、duration、iterations、tool calls、edit count、test runs、failure category。</p>
+
+<h3>Q10：如果 Agent 失败，怎么归因？</h3>
+
+<p>先看 trace，把失败分层：</p>
+<ol>
+  <li>理解错误</li>
+  <li>规划错误</li>
+  <li>工具选择错误</li>
+  <li>工具参数错误</li>
+  <li>工具执行错误</li>
+  <li>上下文丢失</li>
+  <li>最终表达错误</li>
+  <li>评测或环境问题</li>
+</ol>
+
+<p>不同错误进入不同修复链路：prompt 或工具 schema 修复、工具实现修复、memory 策略修复、增加 retry / guardrail、补充 benchmark case，或者沉淀成 SFT / DPO 数据。</p>
+
+<h2>3. Agent 能力迁移：从 Coding 到通用业务场景</h2>
+
+<p>MyAgent 是 coding 场景，但验证的是通用 Agent 的底层机制。把 Read/Edit/Bash 换成业务工具（如地点解析、POI 搜索、路线规划、订单查询、商家推荐、客服工单），本质上还是 tool schema、tool selection、state tracking、observation 反馈和评测闭环。</p>
+
+<p>典型生活服务 Agent 任务类型：</p>
+
+<ul>
+  <li><strong>出行规划</strong>：机场出行规划、预约车、价格和时间约束。</li>
+  <li><strong>餐饮推荐</strong>：按位置、口味、价格、排队时间推荐餐厅。</li>
+  <li><strong>旅游规划</strong>：多天行程规划，约束交通、预算、营业时间。</li>
+  <li><strong>售后处理</strong>：订单查询、退款、投诉、客服工单。</li>
+  <li><strong>组合任务</strong>：先推荐目的地，再规划路线，再提醒时间。</li>
+</ul>
+
+<p>通用 Agent 底层问题：用户需求理解、规划、执行、反思、长上下文、评测，在生活服务场景中完全对应。</p>
+
+<h2>4. RAG 速记</h2>
+
+<h3>4.1 标准链路</h3>
+
+<pre><code>文档收集
+  → 清洗 / 解析
+  → chunk 切分
+  → embedding
+  → 向量库 / 索引
+  → 用户 query
+  → query rewrite / expansion
+  → 召回 top-k
+  → rerank
+  → 拼 prompt
+  → LLM grounded answer
+  → 引用 / 拒答 / 校验</code></pre>
+
+<h3>4.2 一句话解释</h3>
+
+<blockquote>
+  RAG 是让模型在回答前先检索外部知识，把相关证据放进上下文，降低幻觉并提升知识时效性。它不改变模型参数，适合企业知识库、业务规则、文档问答等场景。
+</blockquote>
+
+<h3>4.3 BM25、向量召回、Hybrid Search</h3>
+
+<table>
+  <tr><th>方法</th><th>原理</th><th>优势</th><th>劣势</th></tr>
+  <tr><td>BM25</td><td>关键词匹配</td><td>对精确词、ID、专有名词友好</td><td>对语义改写不够鲁棒</td></tr>
+  <tr><td>向量召回</td><td>语义相似度</td><td>对同义表达、模糊问题友好</td><td>对数字、代码、专有名词可能不稳定</td></tr>
+  <tr><td>Hybrid Search</td><td>双路召回 + reranker</td><td>互补，工业常用</td><td>工程复杂度更高</td></tr>
+</table>
+
+<h3>4.4 Chunk 切分策略</h3>
+
+<p>常见策略：按标题/段落/语义结构切；固定 token 窗口 + overlap；表格、代码、FAQ 保持结构完整。</p>
+
+<table>
+  <tr><th></th><th>chunk 太大</th><th>chunk 太小</th></tr>
+  <tr><td>问题</td><td>召回粒度粗、上下文浪费、相关性稀释</td><td>语义断裂、缺上下文</td></tr>
+</table>
+
+<h3>4.5 Reranker 的作用</h3>
+
+<blockquote>
+  embedding 召回通常追求召回率，可能带很多噪声；reranker 用 query 和候选 chunk 做更精细的相关性判断，把真正有用的证据排到前面。
+</blockquote>
+
+<h3>4.6 RAG 幻觉怎么降</h3>
+
+<ul>
+  <li>检索不到时拒答</li>
+  <li>回答必须引用证据</li>
+  <li>prompt 明确"只能基于材料回答"</li>
+  <li>对答案做 groundedness 检查</li>
+  <li>对关键字段用规则或工具校验</li>
+  <li>建立离线 eval，覆盖无答案、冲突证据、过期知识</li>
+</ul>
+
+<h3>4.7 RAG 评测指标</h3>
+
+<p><strong>检索侧：</strong>Recall@K、Precision@K、MRR、NDCG</p>
+<p><strong>生成侧：</strong>answer relevance、faithfulness / groundedness、hallucination rate、citation accuracy、exact match / F1</p>
+
+<h3>4.8 RAG 接入 Agent 的方式</h3>
+
+<blockquote>
+  把 RAG 做成 RetrievalTool 接入 ToolRegistry。工具输入是 query、top_k、filter，输出是带 source 的 chunks。Agent 先判断是否需要外部知识，如果需要就调用 RetrievalTool，再基于返回证据回答。复杂一点可以加 QueryRewriteTool、RerankTool、EvidenceCheckHook，并在 trace 中记录召回结果和最终引用，方便评测 groundedness。
+</blockquote>
+
+<h2>5. SFT / DPO / RLHF 速记</h2>
+
+<h3>5.1 SFT（Supervised Fine-Tuning，指令微调）</h3>
+
+<blockquote>
+  用高质量 instruction-response 数据继续训练模型，让模型学会按指令回答、遵循格式、使用工具、完成特定领域任务。
+</blockquote>
+
+<p>Agent 场景中 SFT 可以学：</p>
+<ul>
+  <li>工具调用格式</li>
+  <li>任务拆解</li>
+  <li>多轮对话状态追踪</li>
+  <li>特定业务话术</li>
+  <li>拒答和安全边界</li>
+  <li>高质量成功轨迹</li>
+</ul>
+
+<h3>5.2 RLHF（Reinforcement Learning from Human Feedback）</h3>
+
+<p>标准流程：</p>
+<ol>
+  <li>先做 SFT，得到初始策略模型。</li>
+  <li>对同一 prompt 生成多个回答。</li>
+  <li>人类标注 chosen / rejected 或排序。</li>
+  <li>训练 Reward Model。</li>
+  <li>用 PPO 等 RL 算法优化策略模型，让模型生成高 reward 输出。</li>
+</ol>
+
+<p><strong>解决的问题：</strong>单纯 SFT 只能模仿示例，不一定知道偏好。RLHF 让模型更偏好人类认为有帮助、无害、符合要求的输出。</p>
+<p><strong>风险：</strong>训练复杂、成本高、reward hacking、reward model 偏差、可能牺牲多样性。</p>
+
+<h3>5.3 DPO（Direct Preference Optimization）</h3>
+
+<blockquote>
+  不单独训练 Reward Model，也不跑 PPO，而是直接用偏好对训练模型，让 chosen 相对 rejected 的概率更高。
+</blockquote>
+
+<p>和 RLHF/PPO 的区别：</p>
+<ul>
+  <li>RLHF：训练 reward model，再用 PPO 优化。</li>
+  <li>DPO：直接用偏好数据优化策略模型。</li>
+  <li>DPO 工程更简单、更稳定、成本更低。</li>
+</ul>
+
+<p>Agent 场景的 chosen / rejected 可以是：</p>
+<ul>
+  <li>更合理的规划 vs 漏约束的规划</li>
+  <li>正确工具调用 vs 错误工具调用</li>
+  <li>少量必要工具调用 vs 反复无效调用</li>
+  <li>满足业务规则的答案 vs 违反规则的答案</li>
+  <li>成功完成任务的轨迹 vs 失败轨迹</li>
+</ul>
+
+<h3>5.4 三者对比</h3>
+
+<table>
+  <tr><th>方法</th><th>数据</th><th>解决问题</th><th>优点</th><th>难点</th></tr>
+  <tr><td>SFT</td><td>标准答案 / 成功轨迹</td><td>学会做什么、格式怎么输出</td><td>简单稳定</td><td>依赖高质量示例，容易只模仿</td></tr>
+  <tr><td>DPO</td><td>chosen / rejected 偏好对</td><td>多个答案里偏好哪个</td><td>不需要 Reward Model，工程简单</td><td>偏好数据质量关键</td></tr>
+  <tr><td>RLHF</td><td>偏好数据 + Reward Model + RL</td><td>对齐复杂偏好和长期目标</td><td>表达能力强</td><td>成本高，训练不稳定，reward hacking</td></tr>
+</table>
+
+<h3>5.5 Agent 场景怎么用这些方法</h3>
+
+<blockquote>
+  Agent 的质量不只是最终回答，还包括过程质量。SFT 可以让模型学会工具调用格式和标准成功轨迹；DPO 可以让模型偏好更好的规划、更少无效工具调用、更符合业务约束的回答；RLHF/RL 可以把任务完成率、工具调用成功率、用户反馈等作为 reward，但要小心 reward hacking。所以我会先做 trace 和 benchmark，明确失败类型，再决定哪些问题靠 prompt 和工具修复，哪些问题沉淀成 SFT 或 DPO 数据。
+</blockquote>
+
+<h3>5.6 关于 verl</h3>
+
+<blockquote>
+  verl 是面向大模型 RLHF / RL 训练的框架，常用于 PPO、DPO、GRPO 等偏好优化或强化学习训练。它更偏训练基础设施，涉及 rollout、reward、优势估计、分布式训练等。在 Agent 场景中可以用来基于任务结果或偏好数据优化模型策略。
+</blockquote>
+
+<h2>6. 数据飞轮</h2>
+
+<h3>6.1 一句话</h3>
+
+<blockquote>
+  Agent 数据飞轮的关键是把线上交互和离线 benchmark 里的失败轨迹收集起来，做失败归因和数据清洗，再反哺 prompt、工具、评测集、SFT 和 DPO。
+</blockquote>
+
+<h3>6.2 标准流程</h3>
+
+<pre><code>线上日志 / benchmark trace
+  → 脱敏
+  → 失败归因
+  → 样本分层
+  → 修复路径选择
+  → 评测集补充
+  → SFT / DPO 数据构造
+  → 模型或系统迭代
+  → 离线评测
+  → 小流量 A/B
+  → 回到日志</code></pre>
+
+<h3>6.3 失败类型与修复映射</h3>
+
+<table>
+  <tr><th>错误类型</th><th>优先修复方式</th></tr>
+  <tr><td>工具参数错</td><td>tool schema、参数校验、few-shot</td></tr>
+  <tr><td>工具执行失败</td><td>工具实现、重试、fallback</td></tr>
+  <tr><td>规划漏步骤</td><td>prompt、planner、SFT 成功轨迹</td></tr>
+  <tr><td>偏好差</td><td>DPO 偏好数据</td></tr>
+  <tr><td>长上下文丢约束</td><td>结构化状态、summary memory、retrieval memory</td></tr>
+  <tr><td>幻觉</td><td>RAG、groundedness check、拒答策略</td></tr>
+  <tr><td>线上高频 badcase</td><td>加入 benchmark 防回归</td></tr>
+</table>
+
+<h3>6.4 与 MyAgent 的连接</h3>
+
+<blockquote>
+  MyAgent 的 TraceRecorder 和 BenchmarkRunner 就是数据飞轮的入口。Trace 记录每一步发生了什么，Benchmark 提供稳定复现的任务和测试结果。后续可以从 failed traces 里抽取 badcase，人工修正成成功轨迹做 SFT，或者把成功轨迹和失败轨迹配对做 DPO。
+</blockquote>
+
+<h2>7. Agent 评测体系</h2>
+
+<h3>7.1 Agent 评测 vs 普通 QA 评测</h3>
+
+<ul>
+  <li><strong>普通 QA</strong>：多看最终答案是否正确。</li>
+  <li><strong>Agent</strong>：要看最终任务是否完成、工具调用是否正确、过程是否满足约束、成本/耗时/稳定性、失败后能否恢复。</li>
+</ul>
+
+<h3>7.2 核心指标</h3>
+
+<table>
+  <tr><th>类别</th><th>指标</th></tr>
+  <tr><td>任务完成</td><td>Task Success Rate、Constraint Satisfaction Rate</td></tr>
+  <tr><td>工具使用</td><td>Tool Call Accuracy、Tool Argument Accuracy</td></tr>
+  <tr><td>质量</td><td>Hallucination Rate、Groundedness</td></tr>
+  <tr><td>效率</td><td>Average Turns / Iterations、Token Cost、Latency</td></tr>
+  <tr><td>体验</td><td>Human Handoff Rate、User Satisfaction</td></tr>
+</table>
+
+<h3>7.3 评测集设计维度</h3>
+
+<ul>
+  <li>简单单工具任务</li>
+  <li>多工具串联任务</li>
+  <li>多轮改需求任务</li>
+  <li>长上下文任务</li>
+  <li>模糊需求澄清任务</li>
+  <li>有冲突约束任务</li>
+  <li>无法完成但需要拒答的任务</li>
+  <li>工具失败恢复任务</li>
+</ul>
+
+<h3>7.4 LLM-as-a-judge</h3>
+
+<blockquote>
+  LLM-as-a-judge 可以提升评测效率，适合开放式答案和复杂约束检查，但不能完全替代规则和真实结果。能规则化的指标尽量规则化（工具参数、订单状态、测试是否通过）；开放式体验问题用 judge，但要做 judge prompt 固定、样本抽检、一致性校验，并防止模型被待评答案 prompt hack。
+</blockquote>
+
+<h2>8. 高频问题速答</h2>
+
+<h3>8.1 ReAct 是什么？</h3>
+
+<blockquote>
+  ReAct 是 Reasoning + Acting，让模型交替生成思考和动作：先推理下一步，再调用工具，拿到 observation 后继续推理。优点是过程可解释、适合工具使用；缺点是容易循环、步骤多、成本高，对工具描述和停止条件很敏感。
+</blockquote>
+
+<h3>8.2 Plan-and-Execute 和 ReAct 区别？</h3>
+
+<blockquote>
+  ReAct 是边想边做，适合动态任务；Plan-and-Execute 是先生成整体计划，再逐步执行，适合复杂长任务。Plan-and-Execute 更有全局性，但如果计划错了，后续会被带偏，所以常需要 replanning。
+</blockquote>
+
+<h3>8.3 Reflection 有什么用？</h3>
+
+<blockquote>
+  Reflection 是让 Agent 对自己的中间结果或最终结果做检查，发现漏约束、工具错误或答案不一致。适合高价值任务和复杂任务，但会增加成本，也可能让模型过度自我修正。更倾向把 reflection 设计成有触发条件的校验：工具失败、约束多、低置信度时触发。
+</blockquote>
+
+<h3>8.4 如何避免 Agent 无限循环？</h3>
+
+<p>max_iterations、工具调用去重、相同错误计数、任务状态机、明确停止条件、低收益工具调用拦截、失败后转人工或澄清用户。</p>
+
+<h3>8.5 工具调用失败怎么办？</h3>
+
+<p>先把失败作为 observation 返回给模型，而不是系统崩溃。可恢复错误可以 retry，参数错误可以让模型修正参数，权限或业务规则错误要让模型解释并给替代方案。工程上区分 transient error、validation error、permission error、business error。</p>
+
+<h3>8.6 复杂指令遵循怎么做？</h3>
+
+<p>先抽取结构化约束，再规划和执行。过程中维护 state（时间、地点、预算、偏好、禁止项、优先级）。最终答案前做 constraint check。只靠把长指令塞给模型容易漏条件。</p>
+
+<h3>8.7 多轮对话用户改需求怎么办？</h3>
+
+<p>需要状态更新机制。新指令不是简单追加，而是更新已有约束。可以维护 structured state，并记录哪些字段被用户显式覆盖。</p>
+
+<h3>8.8 项目当前不足与改进方向</h3>
+
+<blockquote>
+  MyAgent 目前更偏框架验证和 coding-agent 场景，业务工具和真实线上流量还不够。比如 MemoryManager 当前主要做窗口保留和压缩框架，RAG memory 还没有完整接入；SubAgent 也还需要更严格的任务隔离、取消和结果校验。下一步我会把 benchmark 跑出更稳定的失败分类，然后针对高频失败做工具 schema、memory 和 planning 优化。
+</blockquote>
+
+<h2>9. 核心总结</h2>
+
+<blockquote>
+  主打的是 Agent 工程和评测闭环：让模型能理解任务、调用工具、维护状态、记录 trace、通过 benchmark 发现失败，再把 badcase 变成 prompt、工具、评测集、SFT 或 DPO 数据。RAG 和对齐训练不是孤立技术，它们都要服务于 Agent 的任务完成率。
+</blockquote>
+
+<div class="nav">
+  <span><a href="java-quick-reference.html">&larr; Java Quick Reference</a></span>
+  <span><a href="glossary.html">Agent Harness Glossary &rarr;</a></span>
+</div>
+
+<script src="../assets/lang-switcher.js"></script>
+</body>
+</html>
